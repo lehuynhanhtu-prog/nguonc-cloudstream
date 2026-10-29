@@ -562,7 +562,9 @@ class NguonCProvider : MainAPI() {
         val categories = movie.path("category")
         if (!categories.isObject) return null
 
-        categories.fields().forEachRemaining { entry ->
+        val iterator = categories.fields()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
             val group = entry.value.path("group").value("name")
             if (group.equals("Năm", ignoreCase = true)) {
                 return entry.value.path("list").firstOrNull()?.value("name")?.toIntOrNull()
