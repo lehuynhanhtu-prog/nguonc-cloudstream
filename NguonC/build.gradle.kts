@@ -1,4 +1,4 @@
-version = 2
+version = 3
 
 cloudstream {
     language = "vi"
@@ -7,5 +7,4 @@ cloudstream {
     status = 1
     tvTypes = listOf("Movie", "TvSeries", "Anime")
     iconUrl = "https://www.google.com/s2/favicons?domain=phim.nguonc.com&sz=%size%"
-    isCrossPlatform = true
 }
