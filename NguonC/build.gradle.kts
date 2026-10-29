@@ -1,9 +1,11 @@
-version = 1
+version = 2
+
 cloudstream {
     language = "vi"
-    description = "NguonC API provider for CloudStream"
-    authors = listOf("NguonC Community")
+    description = "NguonC provider for CloudStream"
+    authors = listOf("lehuynhanhtu-prog")
     status = 1
     tvTypes = listOf("Movie", "TvSeries", "Anime")
-    iconUrl = "https://phim.nguonc.com/favicon.ico"
+    iconUrl = "https://www.google.com/s2/favicons?domain=phim.nguonc.com&sz=%size%"
+    isCrossPlatform = true
 }

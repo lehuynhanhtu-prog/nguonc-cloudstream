@@ -14,6 +14,8 @@ Select the NguonC extension to install. Future extension releases are independen
 
 ## Development and releases
 
+Pull requests are compiled by GitHub Actions before changes are merged to `main`.
+
 - Source: `NguonC/src/main/kotlin/com/nguonc/`
 - Build: `gradle make makePluginsJson`
 - GitHub Actions: `.github/workflows/build.yml`
