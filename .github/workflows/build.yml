@@ -1,38 +1,59 @@
 name: Build and publish NguonC
+
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+
 permissions:
   contents: write
+
 concurrency:
-  group: nguonc-build
-  cancel-in-progress: false
+  group: nguonc-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: android-actions/setup-android@v3
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
+
       - name: Build extension and plugin manifest
         run: gradle make makePluginsJson --stacktrace
-      - name: Stage files
+
+      - name: Collect build outputs
         shell: bash
         run: |
+          set -euo pipefail
+          rm -rf publish
           mkdir -p publish
           find . -type f -name '*.cs3' -exec cp {} publish/ \;
-          find . -type f -name 'plugins.json' -not -path './publish/*' -exec cp {} publish/ \;
+          cp build/plugins.json publish/plugins.json
+          cp repo.json publish/repo.json
           test -n "$(find publish -name '*.cs3' -print -quit)"
           test -s publish/plugins.json
-          cp repo.json publish/
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nguonc-extension-build
+          path: publish/
+
       - name: Publish builds branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
