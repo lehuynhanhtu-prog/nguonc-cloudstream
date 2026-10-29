@@ -1,10 +1,18 @@
 package com.nguonc
 
+import android.util.Base64
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.jsoup.Jsoup
+import java.net.URI
 import java.net.URLEncoder
+import java.security.MessageDigest
+import javax.crypto.Cipher
+import javax.crypto.Mac
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 class NguonCProvider : MainAPI() {
     override var mainUrl = "https://phim.nguonc.com"
@@ -13,21 +21,56 @@ class NguonCProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
+    private val mapper = jacksonObjectMapper()
+    private val apiBases = listOf(
+        "$mainUrl/api",
+        "https://nguonc.com/api",
+    )
+
+    private val browserUserAgent =
+        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
     override val mainPage = mainPageOf(
         "films/phim-moi-cap-nhat" to "Mới cập nhật",
         "films/danh-sach/phim-bo" to "Phim bộ",
         "films/danh-sach/phim-le" to "Phim lẻ",
-        "films/danh-sach/hoat-hinh" to "Hoạt hình"
+        "films/danh-sach/tv-shows" to "TV Shows",
+        "films/the-loai/hoat-hinh" to "Hoạt hình",
     )
 
-    private val mapper = jacksonObjectMapper()
+    private fun requestHeaders() = mapOf(
+        "User-Agent" to browserUserAgent,
+        "Accept" to "application/json,text/plain,*/*",
+        "Accept-Language" to "vi-VN,vi;q=0.9,en;q=0.7",
+    )
 
-    private suspend fun api(path: String): JsonNode {
-        val url = if (path.startsWith("http")) path else "$mainUrl/api/$path"
-        return mapper.readTree(app.get(url).text)
+    private fun playerHeaders(referer: String) = mapOf(
+        "User-Agent" to browserUserAgent,
+        "Accept" to "*/*",
+        "Referer" to referer,
+    )
+
+    private suspend fun api(path: String): JsonNode? {
+        val cleanPath = path.trimStart('/')
+        for (base in apiBases) {
+            val result = runCatching {
+                val text = app.get(
+                    "$base/$cleanPath",
+                    headers = requestHeaders(),
+                    referer = "$mainUrl/",
+                ).text
+                mapper.readTree(text)
+            }.getOrNull()
+
+            if (result != null && !result.isNull && result.path("status").asText("success") != "error") {
+                return result
+            }
+        }
+        return null
     }
 
-    private fun JsonNode.text(key: String): String = path(key).asText("").trim()
+    private fun JsonNode.value(key: String): String = path(key).asText("").trim()
 
     private fun poster(raw: String): String? {
         if (raw.isBlank()) return null
@@ -38,155 +81,538 @@ class NguonCProvider : MainAPI() {
         }
     }
 
+    private fun itemType(node: JsonNode): TvType {
+        val total = node.path("total_episodes").asInt(0)
+        val current = node.value("current_episode")
+        return when {
+            total > 1 -> TvType.TvSeries
+            current.contains("tập", ignoreCase = true) -> TvType.TvSeries
+            current.contains("episode", ignoreCase = true) -> TvType.TvSeries
+            else -> TvType.Movie
+        }
+    }
+
     private fun toSearchResponse(node: JsonNode): SearchResponse? {
-        val slug = node.text("slug").ifBlank { return null }
-        val title = node.text("name").ifBlank { slug }
-        return newMovieSearchResponse(title, "$mainUrl/api/film/$slug", TvType.Movie) {
-            posterUrl = poster(node.text("poster_url").ifBlank { node.text("thumb_url") })
+        val slug = node.value("slug").ifBlank { return null }
+        val title = node.value("name").ifBlank { slug }
+        val type = itemType(node)
+
+        return newMovieSearchResponse(title, "$mainUrl/phim/$slug", type) {
+            posterUrl = poster(node.value("poster_url").ifBlank { node.value("thumb_url") })
+            year = node.value("year").toIntOrNull()
+            quality = getQualityFromString(node.value("quality"))
         }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val response = api("${request.data}?page=$page")
-        val items = response.path("items").mapNotNull(::toSearchResponse)
-        return newHomePageResponse(request.name, items)
+        val entries = response?.path("items")?.mapNotNull(::toSearchResponse).orEmpty()
+        return newHomePageResponse(request.name, entries)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, "UTF-8")
         val response = api("films/search?keyword=$encoded&page=1")
-        return response.path("items").mapNotNull(::toSearchResponse)
+        return response?.path("items")?.mapNotNull(::toSearchResponse).orEmpty()
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val slug = url.substringBefore("?").trimEnd('/').substringAfterLast('/')
+        val slug = url.substringBefore('?').substringBefore('#').trimEnd('/').substringAfterLast('/')
         if (slug.isBlank()) return null
 
-        val response = api("film/$slug")
+        val response = api("film/${URLEncoder.encode(slug, "UTF-8")}") ?: return null
         val movie = response.path("movie")
         if (movie.isMissingNode || movie.isNull) return null
 
-        val detailUrl = "$mainUrl/phim/$slug"
-        val rootEpisodes = response.path("episodes")
-        val movieEpisodes = movie.path("episodes")
-        val servers = when {
-            rootEpisodes.isArray && rootEpisodes.size() > 0 -> rootEpisodes
-            movieEpisodes.isArray -> movieEpisodes
-            else -> mapper.createArrayNode()
-        }
+        val resolvedSlug = movie.value("slug").ifBlank { slug }
+        val detailUrl = "$mainUrl/phim/$resolvedSlug"
+        val sources = readEpisodeSources(movie, response, detailUrl)
 
-        val episodes = servers.flatMap { server ->
-            val items = server.path("items").let {
-                if (it.isArray && it.size() > 0) it else server.path("server_data")
-            }
-            items.mapNotNull { ep ->
-                val m3u8 = ep.text("link_m3u8").ifBlank { ep.text("m3u8") }
-                val embed = ep.text("embed").ifBlank { ep.text("link_embed") }
-                if (m3u8.isBlank() && embed.isBlank()) {
-                    null
-                } else {
-                    val payload = mapper.writeValueAsString(
-                        mapOf(
-                            "m3u8" to m3u8,
-                            "embed" to embed,
-                            "referer" to detailUrl
-                        )
-                    )
-                    newEpisode(payload) {
-                        name = ep.text("name").ifBlank { ep.text("slug").ifBlank { "Tập" } }
-                    }
+        val grouped = sources
+            .groupBy { it.key }
+            .values
+            .sortedBy { group -> episodeNumber(group.firstOrNull()?.label.orEmpty()) ?: Int.MAX_VALUE }
+
+        val title = movie.value("name").ifBlank {
+            movie.value("original_name").ifBlank { resolvedSlug }
+        }
+        val cover = poster(movie.value("poster_url").ifBlank { movie.value("thumb_url") })
+        val backdrop = poster(movie.value("thumb_url").ifBlank { movie.value("poster_url") })
+        val plotText = Jsoup.parse(movie.value("description").ifBlank { movie.value("content") }).text()
+        val year = movieYear(movie)
+        val tags = movieTags(movie)
+        val totalEpisodes = movie.path("total_episodes").asInt(0)
+        val isSeries = totalEpisodes > 1 || grouped.size > 1 || isSeriesCategory(movie)
+
+        if (isSeries) {
+            val episodes = grouped.map { group ->
+                val first = group.first()
+                val payload = linkPayload(detailUrl, group)
+                newEpisode(payload) {
+                    name = first.label.ifBlank { "Tập" }
+                    episode = episodeNumber(first.label)
                 }
             }
-        }
 
-        val title = movie.text("name").ifBlank { slug }
-        val cover = poster(movie.text("poster_url").ifBlank { movie.text("thumb_url") })
-        val plotText = movie.text("description").ifBlank { movie.text("content") }
-        val categoryText = movie.path("category").toString().lowercase()
-        val isSeries = episodes.size > 1 ||
-            categoryText.contains("phim bộ") ||
-            categoryText.contains("tv shows") ||
-            movie.text("type").contains("series", ignoreCase = true)
-
-        return if (isSeries) {
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            return newTvSeriesLoadResponse(title, detailUrl, TvType.TvSeries, episodes) {
                 posterUrl = cover
+                backgroundPosterUrl = backdrop
                 plot = plotText
-            }
-        } else {
-            val movieData = episodes.firstOrNull()?.data ?: return null
-            newMovieLoadResponse(title, url, TvType.Movie, movieData) {
-                posterUrl = cover
-                plot = plotText
+                this.year = year
+                this.tags = tags
             }
         }
+
+        val firstGroup = grouped.firstOrNull().orEmpty()
+        if (firstGroup.isEmpty()) return null
+
+        return newMovieLoadResponse(
+            title,
+            detailUrl,
+            TvType.Movie,
+            linkPayload(detailUrl, firstGroup),
+        ) {
+            posterUrl = cover
+            backgroundPosterUrl = backdrop
+            plot = plotText
+            this.year = year
+            this.tags = tags
+        }
+    }
+
+    private suspend fun readEpisodeSources(
+        movie: JsonNode,
+        response: JsonNode,
+        detailUrl: String,
+    ): List<EpisodeSource> {
+        val fromApi = parseServers(
+            when {
+                movie.path("episodes").isArray -> movie.path("episodes")
+                response.path("episodes").isArray -> response.path("episodes")
+                else -> mapper.createArrayNode()
+            }
+        )
+        if (fromApi.isNotEmpty()) return fromApi
+
+        val episodeEndpoint = "$detailUrl/episodes"
+        val fallback = runCatching {
+            val text = app.get(
+                episodeEndpoint,
+                headers = playerHeaders(detailUrl),
+                referer = detailUrl,
+            ).text
+            mapper.readTree(text)
+        }.getOrNull() ?: return emptyList()
+
+        return parseServers(fallback.path("servers"))
+    }
+
+    private fun parseServers(servers: JsonNode): List<EpisodeSource> {
+        if (!servers.isArray) return emptyList()
+
+        return servers.flatMap { server ->
+            val serverName = server.value("server_name").ifBlank {
+                server.value("name").ifBlank { "NguonC" }
+            }
+            val items = when {
+                server.path("items").isArray -> server.path("items")
+                server.path("server_data").isArray -> server.path("server_data")
+                server.path("list").isArray -> server.path("list")
+                else -> mapper.createArrayNode()
+            }
+
+            items.mapNotNull { episode ->
+                val direct = episode.value("link_m3u8").ifBlank {
+                    episode.value("m3u8")
+                }
+                val embed = episode.value("embed").ifBlank {
+                    episode.value("link_embed")
+                }
+                if (direct.isBlank() && embed.isBlank()) return@mapNotNull null
+
+                val label = episode.value("name").ifBlank {
+                    episode.value("slug").ifBlank { "Tập" }
+                }
+                EpisodeSource(
+                    key = episode.value("slug").ifBlank { label },
+                    label = label,
+                    server = serverName,
+                    embed = embed,
+                    direct = direct,
+                )
+            }
+        }
+    }
+
+    private fun linkPayload(referer: String, sources: List<EpisodeSource>): String {
+        val root = mapper.createObjectNode()
+        root.put("referer", referer)
+        val list = root.putArray("sources")
+        for (source in sources) {
+            val item = list.addObject()
+            item.put("name", source.server)
+            item.put("embed", source.embed)
+            item.put("direct", source.direct)
+        }
+        return mapper.writeValueAsString(root)
     }
 
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        if (data.isBlank()) return false
+        val payload = runCatching { mapper.readTree(data) }.getOrNull() ?: return false
+        val referer = payload.value("referer").ifBlank { "$mainUrl/" }
+        val sources = payload.path("sources")
+        if (!sources.isArray) return false
 
-        val payload = try {
-            mapper.readTree(data)
-        } catch (_: Throwable) {
-            null
-        }
-
-        if (payload == null || !payload.isObject) {
-            val raw = data.trim()
-            if (!raw.startsWith("http")) return false
-            if (raw.contains(".m3u8", ignoreCase = true)) {
-                callback(
-                    newExtractorLink(name, "$name HLS", raw, type = ExtractorLinkType.M3U8) {
-                        referer = mainUrl
-                        quality = Qualities.Unknown.value
-                    }
-                )
-                return true
-            }
-            if (raw.contains(".mp4", ignoreCase = true)) {
-                callback(
-                    newExtractorLink(name, "$name Video", raw, type = ExtractorLinkType.VIDEO) {
-                        referer = mainUrl
-                        quality = Qualities.Unknown.value
-                    }
-                )
-                return true
-            }
-            var found = false
-            loadExtractor(raw, mainUrl, subtitleCallback) { link ->
-                found = true
-                callback(link)
-            }
-            return found
-        }
-
-        val referer = payload.text("referer").ifBlank { mainUrl }
-        val embed = payload.text("embed")
-        val hls = payload.text("m3u8")
         var found = false
 
-        if (embed.isNotBlank()) {
-            loadExtractor(embed, referer, subtitleCallback) { link ->
-                found = true
-                callback(link)
-            }
-        }
+        for (source in sources) {
+            val sourceName = source.value("name").ifBlank { name }
+            val direct = source.value("direct")
+            val embed = source.value("embed")
 
-        if (!found && hls.isNotBlank()) {
-            callback(
-                newExtractorLink(name, "$name HLS", hls, type = ExtractorLinkType.M3U8) {
-                    this.referer = referer
-                    quality = Qualities.Unknown.value
+            if (direct.isNotBlank()) {
+                callback(
+                    newExtractorLink(name, "$name - $sourceName", direct, type = ExtractorLinkType.M3U8) {
+                        this.referer = referer
+                        quality = Qualities.Unknown.value
+                        headers = playerHeaders(referer)
+                    }
+                )
+                found = true
+                continue
+            }
+
+            if (embed.isBlank()) continue
+
+            val extracted = runCatching {
+                loadExtractor(embed, referer, subtitleCallback) { link ->
+                    found = true
+                    callback(link)
                 }
-            )
-            found = true
+            }.getOrDefault(false)
+
+            if (!extracted) {
+                resolveStreamC(embed, referer)?.let { stream ->
+                    callback(
+                        newExtractorLink(
+                            name,
+                            "$name - $sourceName",
+                            stream.url,
+                            type = stream.type,
+                        ) {
+                            this.referer = stream.referer
+                            quality = Qualities.Unknown.value
+                            headers = stream.headers
+                        }
+                    )
+                    found = true
+                }
+            }
         }
 
         return found
     }
+
+    private suspend fun resolveStreamC(embedUrl: String, movieUrl: String): ResolvedStream? {
+        return runCatching {
+            val embedHtml = app.get(
+                embedUrl,
+                headers = playerHeaders(movieUrl),
+                referer = movieUrl,
+            ).text
+
+            findDirectMedia(embedHtml)?.let { direct ->
+                return@runCatching ResolvedStream(
+                    url = URI(embedUrl).resolve(direct).toString(),
+                    referer = embedUrl,
+                    type = if (direct.contains(".m3u8", true)) {
+                        ExtractorLinkType.M3U8
+                    } else {
+                        ExtractorLinkType.VIDEO
+                    },
+                    headers = playerHeaders(embedUrl),
+                )
+            }
+
+            val bootstrapBlock = Regex(
+                """<script[^>]*id=["']stream-bootstrap["'][^>]*>(.*?)</script>""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+            ).find(embedHtml)?.groupValues?.getOrNull(1)
+
+            if (!bootstrapBlock.isNullOrBlank()) {
+                val meta = mapper.readTree(bootstrapBlock)
+                val rawApi = meta.value("api")
+                if (rawApi.isBlank()) return@runCatching null
+
+                val bootstrapApi = URI(embedUrl).resolve(rawApi).toString()
+                val embedOrigin = originOf(embedUrl)
+                val movieOrigin = originOf(movieUrl)
+
+                val responseText = app.post(
+                    bootstrapApi,
+                    json = mapOf(
+                        "action" to "bootstrap",
+                        "referrer" to movieUrl.take(4096),
+                        "frame_origins" to listOf(movieOrigin),
+                        "request_grant" to true,
+                        "playlist_format" to "aesgcm-v2",
+                        "pretty_url" to true,
+                        "path_chunks" to true,
+                        "bootstrap_format" to "aesgcm-v1",
+                    ),
+                    headers = mapOf(
+                        "User-Agent" to browserUserAgent,
+                        "Accept" to "application/json,text/plain,*/*",
+                        "Origin" to embedOrigin,
+                    ),
+                    referer = embedUrl,
+                ).text
+
+                val envelope = mapper.readTree(responseText)
+                val openedText = if (envelope.value("format") == "aesgcm-v1") {
+                    decryptBootstrap(
+                        envelope.value("iv"),
+                        envelope.value("data"),
+                        bootstrapApi,
+                    )
+                } else {
+                    responseText
+                }
+
+                val opened = mapper.readTree(openedText)
+                val playlistUrl = opened.path("preissued").value("playlist")
+                if (playlistUrl.isBlank()) return@runCatching null
+
+                var playlist = app.get(
+                    playlistUrl,
+                    headers = playerHeaders(embedUrl),
+                    referer = embedUrl,
+                ).text
+
+                if (playlist.contains("#ENC-AESGCM")) {
+                    val videoHash = opened.value("video").ifBlank {
+                        Regex("""[?&]hash=([0-9a-fA-F]+)""")
+                            .find(embedUrl)?.groupValues?.getOrNull(1).orEmpty()
+                    }
+                    if (videoHash.isBlank()) return@runCatching null
+                    playlist = decryptPlaylist(playlist, videoHash)
+                }
+
+                val absolute = absolutizePlaylist(playlist, playlistUrl)
+                val encoded = Base64.encodeToString(
+                    absolute.toByteArray(Charsets.UTF_8),
+                    Base64.NO_WRAP,
+                )
+
+                return@runCatching ResolvedStream(
+                    url = "data:application/vnd.apple.mpegurl;base64,$encoded",
+                    referer = embedUrl,
+                    type = ExtractorLinkType.M3U8,
+                    headers = playerHeaders(embedUrl),
+                )
+            }
+
+            val legacyValue = Regex("""data-obf=["']([^"']+)["']""")
+                .find(embedHtml)?.groupValues?.getOrNull(1)
+                ?: return@runCatching null
+            val legacyJson = String(Base64.decode(legacyValue, Base64.DEFAULT), Charsets.UTF_8)
+            val legacy = mapper.readTree(legacyJson)
+            val path = legacy.value("sUb")
+            if (path.isBlank()) return@runCatching null
+
+            val origin = originOf(embedUrl)
+            val legacyUrl = when {
+                path.startsWith("http://") || path.startsWith("https://") -> path
+                path.endsWith(".m3u8", true) -> "$origin/${path.trimStart('/')}"
+                else -> "$origin/${path.trimStart('/')}.m3u8"
+            }
+
+            var legacyPlaylist = app.get(
+                legacyUrl,
+                headers = playerHeaders(embedUrl),
+                referer = embedUrl,
+            ).text
+
+            if (legacyPlaylist.contains("#ENC-AESGCM")) {
+                val videoHash = legacy.value("hD")
+                if (videoHash.isBlank()) return@runCatching null
+                legacyPlaylist = decryptPlaylist(legacyPlaylist, videoHash)
+                legacyPlaylist = absolutizePlaylist(legacyPlaylist, legacyUrl)
+
+                val encoded = Base64.encodeToString(
+                    legacyPlaylist.toByteArray(Charsets.UTF_8),
+                    Base64.NO_WRAP,
+                )
+                return@runCatching ResolvedStream(
+                    url = "data:application/vnd.apple.mpegurl;base64,$encoded",
+                    referer = embedUrl,
+                    type = ExtractorLinkType.M3U8,
+                    headers = playerHeaders(embedUrl),
+                )
+            }
+
+            ResolvedStream(
+                url = legacyUrl,
+                referer = embedUrl,
+                type = ExtractorLinkType.M3U8,
+                headers = playerHeaders(embedUrl),
+            )
+        }.getOrNull()
+    }
+
+    private fun decryptBootstrap(ivHex: String, dataBase64: String, apiUrl: String): String {
+        require(ivHex.isNotBlank() && dataBase64.isNotBlank())
+        val aad = "stream-bootstrap-v1\n$apiUrl".toByteArray(Charsets.UTF_8)
+        val key = MessageDigest.getInstance("SHA-256").digest(aad)
+        val clear = aesGcmDecrypt(
+            key = key,
+            iv = hexBytes(ivHex),
+            encrypted = Base64.decode(dataBase64, Base64.DEFAULT),
+            aad = aad,
+        )
+        return String(clear, Charsets.UTF_8)
+    }
+
+    private fun decryptPlaylist(encryptedPlaylist: String, videoHash: String): String {
+        val iv = Regex("""#ENC-AESGCM[^\n]*iv=([0-9a-fA-F]+)""")
+            .find(encryptedPlaylist)?.groupValues?.getOrNull(1)
+            ?: error("Missing playlist IV")
+
+        val payload = encryptedPlaylist
+            .lineSequence()
+            .map(String::trim)
+            .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
+            ?: error("Missing encrypted playlist payload")
+
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec("stream-derive-v1".toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        val key = mac.doFinal(videoHash.toByteArray(Charsets.UTF_8))
+
+        return String(
+            aesGcmDecrypt(
+                key = key,
+                iv = hexBytes(iv),
+                encrypted = Base64.decode(payload, Base64.DEFAULT),
+            ),
+            Charsets.UTF_8,
+        )
+    }
+
+    private fun aesGcmDecrypt(
+        key: ByteArray,
+        iv: ByteArray,
+        encrypted: ByteArray,
+        aad: ByteArray? = null,
+    ): ByteArray {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            SecretKeySpec(key, "AES"),
+            GCMParameterSpec(128, iv),
+        )
+        aad?.let(cipher::updateAAD)
+        return cipher.doFinal(encrypted)
+    }
+
+    private fun absolutizePlaylist(playlist: String, baseUrl: String): String {
+        val base = URI(baseUrl)
+        val uriPattern = Regex("""URI="([^"]+)"""", RegexOption.IGNORE_CASE)
+
+        return playlist.lineSequence().joinToString("\n") { raw ->
+            val line = raw.trim()
+            when {
+                line.isBlank() -> line
+                line.startsWith("#") -> uriPattern.replace(line) { match ->
+                    "URI=\"${base.resolve(match.groupValues[1])}\""
+                }
+                else -> base.resolve(line).toString()
+            }
+        }
+    }
+
+    private fun findDirectMedia(text: String): String? {
+        return Regex(
+            """https?:\\?/\\?/[^"'\\\s<>]+?\.(?:m3u8|mp4)(?:\?[^"'\\\s<>]*)?""",
+            RegexOption.IGNORE_CASE,
+        ).find(text)?.value?.replace("\\/", "/")
+    }
+
+    private fun originOf(url: String): String {
+        val uri = URI(url)
+        return "${uri.scheme}://${uri.authority}"
+    }
+
+    private fun hexBytes(value: String): ByteArray {
+        require(value.length % 2 == 0)
+        return ByteArray(value.length / 2) { index ->
+            value.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
+    }
+
+    private fun episodeNumber(label: String): Int? =
+        Regex("""\d+""").find(label)?.value?.toIntOrNull()
+
+    private fun movieYear(movie: JsonNode): Int? {
+        movie.value("year").toIntOrNull()?.let { return it }
+        val categories = movie.path("category")
+        if (!categories.isObject) return null
+
+        categories.fields().forEachRemaining { entry ->
+            val group = entry.value.path("group").value("name")
+            if (group.equals("Năm", ignoreCase = true)) {
+                return entry.value.path("list").firstOrNull()?.value("name")?.toIntOrNull()
+            }
+        }
+        return null
+    }
+
+    private fun movieTags(movie: JsonNode): List<String> {
+        val categories = movie.path("category")
+        if (!categories.isObject) return emptyList()
+
+        val output = mutableListOf<String>()
+        categories.fields().forEachRemaining { entry ->
+            val groupName = entry.value.path("group").value("name")
+            if (groupName.equals("Năm", true)) return@forEachRemaining
+            entry.value.path("list").forEach { item ->
+                item.value("name").takeIf(String::isNotBlank)?.let(output::add)
+            }
+        }
+        return output.distinct()
+    }
+
+    private fun isSeriesCategory(movie: JsonNode): Boolean {
+        val categories = movie.path("category")
+        if (!categories.isObject) return false
+
+        val text = buildString {
+            categories.fields().forEachRemaining { entry ->
+                entry.value.path("list").forEach { item ->
+                    append(item.value("name")).append(' ')
+                }
+            }
+        }.lowercase()
+
+        return text.contains("phim bộ") || text.contains("tv show")
+    }
 }
+
+private data class EpisodeSource(
+    val key: String,
+    val label: String,
+    val server: String,
+    val embed: String,
+    val direct: String,
+)
+
+private data class ResolvedStream(
+    val url: String,
+    val referer: String,
+    val type: ExtractorLinkType,
+    val headers: Map<String, String>,
+)
