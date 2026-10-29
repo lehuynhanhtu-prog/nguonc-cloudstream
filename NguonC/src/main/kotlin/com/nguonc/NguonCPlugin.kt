@@ -1,12 +1,11 @@
 package com.nguonc
 
-import android.content.Context
+import com.lagradost.cloudstream3.plugins.BasePlugin
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
-import com.lagradost.cloudstream3.plugins.Plugin
 
 @CloudstreamPlugin
-class NguonCPlugin : Plugin() {
-    override fun load(context: Context) {
+class NguonCPlugin : BasePlugin() {
+    override fun load() {
         registerMainAPI(NguonCProvider())
     }
 }
