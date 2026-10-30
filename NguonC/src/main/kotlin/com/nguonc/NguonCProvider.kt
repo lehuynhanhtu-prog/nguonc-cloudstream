@@ -515,6 +515,7 @@ class NguonCProvider : MainAPI() {
         }
 
         suspend fun emitSource(source: EpisodeSource): Boolean {
+            Log.i("NguonC", "emitSource server=${source.server} direct=${source.direct.isNotBlank()} embed=${source.embed.take(120)}")
             if (source.direct.isNotBlank()) {
                 callback(
                     newExtractorLink(
@@ -534,6 +535,7 @@ class NguonCProvider : MainAPI() {
             if (source.embed.isBlank()) return false
 
             resolveStreamC(source.embed, referer)?.let { stream ->
+                Log.i("NguonC", "resolved stream url=${stream.url} manifestKey=${stream.manifestKey}")
                 callback(
                     newExtractorLink(
                         name,
@@ -554,9 +556,11 @@ class NguonCProvider : MainAPI() {
                         }
                     }
                 )
+                Log.i("NguonC", "callback emitted custom stream")
                 return true
             }
 
+            Log.w("NguonC", "custom StreamC resolver returned null; trying generic extractor")
             var extracted = false
             runCatching {
                 loadExtractor(source.embed, referer, subtitleCallback) { link ->
@@ -566,6 +570,7 @@ class NguonCProvider : MainAPI() {
             }.onFailure {
                 Log.w("NguonC", "Generic extractor failed: ${it.javaClass.simpleName}: ${it.message}")
             }
+            Log.i("NguonC", "generic extractor emitted=$extracted")
             return extracted
         }
 
@@ -599,7 +604,9 @@ class NguonCProvider : MainAPI() {
                 referer = movieUrl,
                 navigation = true,
             )
+            Log.i("NguonC", "embed HTTP=${embedResponse.code} bytes=${embedResponse.text.length} final=${embedResponse.finalUrl}")
             if (embedResponse.code !in 200..299 || embedResponse.text.isBlank()) {
+                Log.w("NguonC", "embed fetch failed")
                 return@runCatching null
             }
             val embedHtml = embedResponse.text
@@ -663,7 +670,9 @@ class NguonCProvider : MainAPI() {
                     origin = embedOrigin,
                     json = bootstrapBody,
                 )
+                Log.i("NguonC", "bootstrap HTTP=${bootstrapResponse.code} bytes=${bootstrapResponse.text.length}")
                 if (bootstrapResponse.code !in 200..299 || bootstrapResponse.text.isBlank()) {
+                    Log.w("NguonC", "bootstrap failed body=${bootstrapResponse.text.take(300)}")
                     return@runCatching null
                 }
 
@@ -680,7 +689,11 @@ class NguonCProvider : MainAPI() {
 
                 val opened = mapper.readTree(openedText)
                 val playlistUrl = opened.path("preissued").value("playlist")
-                if (playlistUrl.isBlank()) return@runCatching null
+                Log.i("NguonC", "bootstrap opened playlist=${playlistUrl.take(180)} turnstile=${opened.path("turnstileEnabled").asBoolean(false)}")
+                if (playlistUrl.isBlank()) {
+                    Log.w("NguonC", "bootstrap has no playlist")
+                    return@runCatching null
+                }
 
                 val videoHash = opened.value("video").ifBlank {
                     Regex("""[?&]hash=([0-9a-fA-F]+)""")
@@ -692,7 +705,9 @@ class NguonCProvider : MainAPI() {
                     url = playlistUrl,
                     referer = embedUrl,
                 )
+                Log.i("NguonC", "playlist HTTP=${playlistResponse.code} bytes=${playlistResponse.text.length} encrypted=${playlistResponse.text.contains("#ENC-AESGCM")}")
                 if (playlistResponse.code !in 200..299 || playlistResponse.text.isBlank()) {
+                    Log.w("NguonC", "playlist fetch failed")
                     return@runCatching null
                 }
 
@@ -700,7 +715,9 @@ class NguonCProvider : MainAPI() {
                 if (playlist.contains("#ENC-AESGCM")) {
                     playlist = decryptPlaylist(playlist, videoHash)
                 }
+                Log.i("NguonC", "playlist decrypted extm3u=${playlist.contains("#EXTM3U")} bytes=${playlist.length}")
                 if (!playlist.contains("#EXTM3U")) {
+                    Log.w("NguonC", "decrypted playlist invalid")
                     return@runCatching null
                 }
 
