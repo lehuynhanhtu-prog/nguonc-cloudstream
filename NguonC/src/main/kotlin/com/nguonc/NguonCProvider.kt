@@ -6,6 +6,9 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
+import android.util.Log
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -266,10 +269,10 @@ class NguonCProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val payload = runCatching { mapper.readTree(data) }.getOrNull() ?: return false
+        val payload = runCatching { mapper.readTree(data) }.getOrNull() ?: run { Log.e("NguonC", "loadLinks: invalid payload"); return false }
         val referer = payload.value("referer").ifBlank { "$mainUrl/" }
         val sources = payload.path("sources")
-        if (!sources.isArray) return false
+        if (!sources.isArray) { Log.e("NguonC", "loadLinks: no source array"); return false }
 
         var found = false
 
@@ -299,7 +302,7 @@ class NguonCProvider : MainAPI() {
                     found = true
                     callback(link)
                 }
-            }
+            }.onFailure { Log.w("NguonC", "Generic extractor failed: ${it.javaClass.simpleName}: ${it.message}") }
 
             if (!sourceFound) {
                 resolveStreamC(embed, referer)?.let { stream ->
@@ -329,6 +332,7 @@ class NguonCProvider : MainAPI() {
             }
         }
 
+        if (!found) Log.e("NguonC", "loadLinks: no playable links from ${sources.size()} source(s)")
         return found
     }
 
@@ -368,25 +372,29 @@ class NguonCProvider : MainAPI() {
                 val embedOrigin = originOf(embedUrl)
                 val movieOrigin = originOf(movieUrl)
 
-                val responseText = app.post(
+                val bootstrapBody = mapper.writeValueAsString(mapOf(
+                    "action" to "bootstrap",
+                    "referrer" to movieUrl.take(4096),
+                    "frame_origins" to listOf(movieOrigin),
+                    "request_grant" to true,
+                    "playlist_format" to "aesgcm-v2",
+                    "pretty_url" to true,
+                    "path_chunks" to true,
+                    "bootstrap_format" to "aesgcm-v1",
+                ))
+                val bootstrapResponse = app.post(
                     bootstrapApi,
-                    json = mapOf(
-                        "action" to "bootstrap",
-                        "referrer" to movieUrl.take(4096),
-                        "frame_origins" to listOf(movieOrigin),
-                        "request_grant" to true,
-                        "playlist_format" to "aesgcm-v2",
-                        "pretty_url" to true,
-                        "path_chunks" to true,
-                        "bootstrap_format" to "aesgcm-v1",
-                    ),
+                    requestBody = bootstrapBody.toRequestBody("application/json".toMediaType()),
                     headers = mapOf(
                         "User-Agent" to browserUserAgent,
                         "Accept" to "application/json,text/plain,*/*",
                         "Origin" to embedOrigin,
+                        "Referer" to embedUrl,
                     ),
-                    referer = embedUrl,
-                ).text
+                )
+                Log.d("NguonC", "StreamC bootstrap status=${bootstrapResponse.code}")
+                if (bootstrapResponse.code != 200) return@runCatching null
+                val responseText = bootstrapResponse.text
 
                 val envelope = mapper.readTree(responseText)
                 val openedText = if (envelope.value("format") == "aesgcm-v1") {
@@ -440,7 +448,7 @@ class NguonCProvider : MainAPI() {
                 headers = playerHeaders(embedUrl),
                 videoHash = legacy.value("hD").ifBlank { null },
             )
-        }.getOrNull()
+        }.onFailure { Log.e("NguonC", "StreamC resolver: ${it.javaClass.simpleName}: ${it.message}", it) }.getOrNull()
     }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
