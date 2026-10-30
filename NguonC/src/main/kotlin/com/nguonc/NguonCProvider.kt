@@ -36,7 +36,7 @@ class NguonCProvider : MainAPI() {
     override val hasMainPage = true
     override val usesWebView = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
-    override val loadLinksTimeoutMs: Long? = 60_000L
+    override val loadLinksTimeoutMs: Long? = 90_000L
 
     private val mapper = jacksonObjectMapper()
     private val apiBases = listOf(
@@ -558,8 +558,8 @@ class NguonCProvider : MainAPI() {
 
             if (source.embed.isBlank()) return false
 
-            val stream = resolveStreamC(source.embed, referer)
-                ?: resolveStreamCWithWebView(source.embed, referer)
+            val stream = resolveStreamCWithWebView(source.embed, referer)
+                ?: resolveStreamC(source.embed, referer)
 
             stream?.let { stream ->
                 Log.i("NguonC", "resolved stream url=${stream.url} manifestKey=${stream.manifestKey}")
@@ -636,7 +636,7 @@ class NguonCProvider : MainAPI() {
                 ),
                 userAgent = null,
                 useOkhttp = false,
-                timeout = 35_000L,
+                timeout = 30_000L,
             )
 
             val response = app.get(
