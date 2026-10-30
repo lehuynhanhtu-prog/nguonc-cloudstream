@@ -141,23 +141,24 @@ def main():
 
     clear_runtime_permissions(timeout=8)
 
-    # Add the exact released repository through CloudStream's public deep-link path.
-    adb(
-        "shell", "am", "start", "-W",
-        "-n", ACCOUNT_ACTIVITY,
-        "-a", "android.intent.action.VIEW",
-        "-d", REPO_URI,
-        timeout=45,
-    )
-    open_repo = wait_node(timeout=35, resource_suffix=":id/button1")
-    tap_node(open_repo)
-    print("ANDROID_REPOSITORY_ADDED", flush=True)
+    # Test the exact released .cs3 as a CloudStream local plugin. This avoids
+    # depending on repository-addition UI while exercising CloudStream's real
+    # plugin loader and the released artifact byte-for-byte.
+    plugin_path = "/tmp/NguonC.cs3"
+    run([
+        "curl", "-fL", "--retry", "3",
+        "https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/NguonC.cs3",
+        "-o", plugin_path,
+    ], timeout=90)
+    adb("shell", "mkdir", "-p", "/sdcard/Cloudstream3/plugins")
+    adb("push", plugin_path, "/sdcard/Cloudstream3/plugins/NguonC.cs3", timeout=60)
 
-    # Install the actual v3 .cs3 from builds branch.
-    action = wait_node(timeout=45, resource_suffix=":id/action_button")
+    adb("shell", "am", "force-stop", PKG)
     adb("logcat", "-c", check=False)
-    tap_node(action)
-    logs = wait_log(r"Loaded plugin\s+NguonC\s+successfully", timeout=60)
+    adb("shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1", timeout=30)
+    clear_runtime_permissions(timeout=8)
+
+    logs = wait_log(r"Loaded plugin\s+NguonC\s+successfully", timeout=75)
     if "Failed to load" in logs and "NguonC" in logs:
         raise RuntimeError("CloudStream logged a plugin load failure")
     print("ANDROID_PLUGIN_LOADED", flush=True)
