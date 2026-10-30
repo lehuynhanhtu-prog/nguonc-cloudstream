@@ -104,6 +104,10 @@ def clear_runtime_permissions(timeout=20):
     ):
         adb("shell", "pm", "grant", PKG, perm, check=False, timeout=20)
 
+    # CloudStream declares MANAGE_EXTERNAL_STORAGE specifically for its plugin API.
+    # On Android 11+ it is controlled by AppOps, not by pm grant.
+    adb("shell", "appops", "set", PKG, "MANAGE_EXTERNAL_STORAGE", "allow", check=False, timeout=20)
+
     end = time.time() + timeout
     while time.time() < end:
         root, _ = dump_ui()
@@ -151,7 +155,10 @@ def main():
         "-o", plugin_path,
     ], timeout=90)
     adb("shell", "mkdir", "-p", "/sdcard/Cloudstream3/plugins")
+    adb("shell", "rm", "-f", "/sdcard/Cloudstream3/safe", check=False)
     adb("push", plugin_path, "/sdcard/Cloudstream3/plugins/NguonC.cs3", timeout=60)
+    print(adb("shell", "ls", "-l", "/sdcard/Cloudstream3/plugins", check=False), flush=True)
+    print(adb("shell", "appops", "get", PKG, "MANAGE_EXTERNAL_STORAGE", check=False), flush=True)
 
     adb("shell", "am", "force-stop", PKG)
     adb("logcat", "-c", check=False)
