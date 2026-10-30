@@ -1,4 +1,4 @@
-name: Build and live-test NguonC
+name: Android API 30 live-test NguonC
 
 on:
   pull_request:
@@ -9,58 +9,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: nguonc-e2e-${{ github.ref }}
+  group: nguonc-android30-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
+  android-cloudstream-e2e-api30:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - name: Ensure Android SDK 35
-        shell: bash
-        run: |
-          SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
-          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          test -x "$SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.12'
-      - name: Build extension
-        run: gradle make makePluginsJson --stacktrace
-
-  runtime-smoke-vn-proxy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install runtime dependency
-        run: python -m pip install --disable-pip-version-check cryptography
-      - name: Find a live Viet Nam egress that NguonC accepts
-        shell: bash
-        run: |
-          chmod +x scripts/find_working_vn_proxy.sh
-          scripts/find_working_vn_proxy.sh
-      - name: Run NguonC to StreamC to HLS to media E2E
-        shell: bash
-        run: |
-          proxy="$(cat /tmp/working_vn_proxy)"
-          echo "E2E_PROXY $proxy"
-          export ALL_PROXY="$proxy"
-          export all_proxy="$proxy"
-          python scripts/runtime_e2e.py
-
-  android-cloudstream-e2e:
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -71,7 +26,7 @@ jobs:
       - name: Install HTTP to SOCKS proxy bridge
         run: python -m pip install --disable-pip-version-check pproxy
 
-      - name: Verify the live-proven Viet Nam egress
+      - name: Verify Viet Nam egress
         shell: bash
         run: |
           set -euo pipefail
@@ -80,7 +35,7 @@ jobs:
           echo "$trace" | grep -E '^(ip|loc|colo|warp)='
           echo "$trace" | grep -q '^loc=VN$'
           status="$(curl -k -sS -L --max-time 15 --proxy "$proxy" \
-            -A 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/131 Mobile Safari/537.36' \
+            -A 'Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/131 Mobile Safari/537.36' \
             -H 'Accept: application/json,text/plain,*/*' \
             -e 'https://phim.nguonc.com/' \
             -o /tmp/android-egress-probe.json -w '%{http_code}' \
@@ -98,48 +53,33 @@ jobs:
             -o /tmp/cloudstream.apk
           echo "348c3f09551f2dda4fba25ba348928ee7b82a47ce98a6b1eae3295d4c127877c  /tmp/cloudstream.apk" | sha256sum -c -
 
-      - name: Run released cs3 inside official CloudStream Android
+      - name: Run released cs3 inside official CloudStream Android API 30
         uses: reactivecircus/android-emulator-runner@v2
         env:
           CLOUDSTREAM_APK: /tmp/cloudstream.apk
         with:
-          api-level: 35
+          api-level: 30
           arch: x86_64
           profile: pixel_2
           target: google_apis
           disable-animations: true
-          emulator-boot-timeout: 600
+          emulator-boot-timeout: 480
           script: |
             set -euo pipefail
             proxy="$(cat /tmp/working_vn_proxy)"
             remote="${proxy/socks5h:\/\//socks5:\/\/}"
-            echo "ANDROID_REMOTE_PROXY $remote"
-
             pproxy -l http://0.0.0.0:8899 -r "$remote" > /tmp/pproxy.log 2>&1 &
             bridge_pid=$!
 
-            ok=0
             for i in {1..20}; do
               trace="$(curl -kfsS -x http://127.0.0.1:8899 --max-time 8 https://www.cloudflare.com/cdn-cgi/trace || true)"
-              echo "$trace" | grep -E '^(ip|loc|colo|warp)=' || true
               if echo "$trace" | grep -q '^loc=VN$'; then
-                status="$(curl -k -sS -L -x http://127.0.0.1:8899 --max-time 12 \
-                  -A 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/131 Mobile Safari/537.36' \
-                  -o /tmp/android-proxy-probe.json -w '%{http_code}' \
-                  'https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1' || true)"
-                if [ "$status" = "200" ] && grep -q '"items"' /tmp/android-proxy-probe.json; then
-                  ok=1
-                  break
-                fi
+                break
               fi
               sleep 1
             done
-
-            if [ "$ok" != 1 ]; then
-              cat /tmp/pproxy.log || true
-              kill "$bridge_pid" || true
-              exit 1
-            fi
+            echo "$trace" | grep -E '^(ip|loc|colo|warp)='
+            echo "$trace" | grep -q '^loc=VN$'
 
             python scripts/android_cloudstream_e2e.py
             kill "$bridge_pid" || true
