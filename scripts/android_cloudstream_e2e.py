@@ -258,29 +258,31 @@ def main():
     print("ANDROID_HOME_CATALOG_OK", flush=True)
     tap_node(first_card)
 
-    # The real provider must successfully load metadata/episodes to expose a play button.
-    play = None
+    # The result can be a movie (single Play button) or a series (episode rows).
+    # For series, tapping the first episode is the real user path into loadLinks().
+    launch = None
     end = time.time() + 75
     while time.time() < end:
         root, xml = dump_ui()
-        play = (
-            find_node(root, resource_suffix=":id/result_play_series_button")
-            or find_node(root, resource_suffix=":id/result_play_movie_button")
+        launch = (
+            find_node(root, resource_suffix=":id/result_play_movie_button")
+            or find_node(root, resource_suffix=":id/result_play_series_button")
+            or find_node(root, resource_suffix=":id/episode_holder")
         )
-        if play is not None:
+        if launch is not None:
             break
         if find_node(root, resource_suffix=":id/result_loading_error") is not None:
             print("RESULT_ERROR_UI", xml[-12000:], flush=True)
             raise RuntimeError("CloudStream result page entered error state")
         time.sleep(1)
-    if play is None:
+    if launch is None:
         root, xml = dump_ui()
         print("RESULT_PAGE_TIMEOUT_UI", xml[-20000:], flush=True)
         print("FOCUSED_ACTIVITY", adb("shell", "dumpsys", "activity", "activities", check=False, timeout=20)[-12000:], flush=True)
-        raise RuntimeError("real NguonC title did not expose a play button in CloudStream")
+        raise RuntimeError("real NguonC title did not expose a movie play button or episode row")
 
     print("ANDROID_PROVIDER_METADATA_AND_EPISODES_OK", flush=True)
-    tap_node(play)
+    tap_node(launch)
 
     # Confirm that the real CloudStream Media3 player rendered video, not merely
     # that loadLinks returned an URL.
