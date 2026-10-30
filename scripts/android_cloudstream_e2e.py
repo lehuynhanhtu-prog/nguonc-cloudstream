@@ -214,13 +214,23 @@ def main():
     adb("shell", "am", "force-stop", PKG)
     adb("logcat", "-c", check=False)
 
-    # Open a real NguonC title through CloudStream. AccountSelectActivity propagates
-    # this VIEW intent into non-exported MainActivity.
+    # Start normally first and wait for the local plugin to be loaded. Previous E2E
+    # attempts sent the movie VIEW intent immediately after process start, racing the
+    # asynchronous plugin loader and leaving MainActivity with no matching provider.
+    adb("shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1", timeout=30)
+    clear_runtime_permissions(timeout=8)
+    finish_first_run_setup(timeout=40)
+    wait_log(r"Loaded plugin\s+NguonC(?:\.cs3)?\s+successfully", timeout=45)
+    print("ANDROID_PLUGIN_RELOADED_WITH_PROXY", flush=True)
+
+    # Now open a real NguonC title and explicitly identify the provider. The extra is
+    # propagated by AccountSelectActivity2 into MainActivity as API_NAME_EXTRA_KEY.
     adb(
         "shell", "am", "start", "-W",
         "-n", ACCOUNT_ACTIVITY,
         "-a", "android.intent.action.VIEW",
         "-d", MOVIE_URL,
+        "--es", "API_NAME_EXTRA_KEY", "NguonC",
         timeout=45,
     )
 
