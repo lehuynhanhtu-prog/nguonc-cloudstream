@@ -6,6 +6,7 @@ import android.util.Log
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import okhttp3.Interceptor
@@ -33,6 +34,7 @@ class NguonCProvider : MainAPI() {
     override var name = "NguonC"
     override var lang = "vi"
     override val hasMainPage = true
+    override val usesWebView = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
     override val loadLinksTimeoutMs: Long? = 60_000L
 
@@ -556,7 +558,10 @@ class NguonCProvider : MainAPI() {
 
             if (source.embed.isBlank()) return false
 
-            resolveStreamC(source.embed, referer)?.let { stream ->
+            val stream = resolveStreamC(source.embed, referer)
+                ?: resolveStreamCWithWebView(source.embed, referer)
+
+            stream?.let { stream ->
                 Log.i("NguonC", "resolved stream url=${stream.url} manifestKey=${stream.manifestKey}")
                 callback(
                     newExtractorLink(
@@ -617,6 +622,65 @@ class NguonCProvider : MainAPI() {
             "loadLinks: no playable links original=${sources.size} refreshed=${refreshed.size}",
         )
         return false
+    }
+
+    private suspend fun resolveStreamCWithWebView(
+        embedUrl: String,
+        movieUrl: String,
+    ): ResolvedStream? {
+        return runCatching {
+            Log.i("NguonC", "trying WebView resolver for $embedUrl")
+            val resolver = WebViewResolver(
+                interceptUrl = Regex(
+                    """(?i)(?:\\.m3u8(?:[?#]|$)|/[^?#]*playlist[^?#]*(?:[?#]|$))"""
+                ),
+                userAgent = null,
+                useOkhttp = false,
+                timeout = 35_000L,
+            )
+
+            val response = app.get(
+                url = embedUrl,
+                referer = movieUrl,
+                interceptor = resolver,
+                headers = mapOf("Referer" to movieUrl),
+            )
+
+            val interceptedUrl = response.url
+            var playlist = response.text
+            Log.i(
+                "NguonC",
+                "WebView result url=$interceptedUrl bytes=${playlist.length}",
+            )
+
+            if (playlist.contains("#ENC-AESGCM")) {
+                val videoHash = Regex("""[?&]hash=([0-9a-fA-F]+)""")
+                    .find(embedUrl)?.groupValues?.getOrNull(1).orEmpty()
+                if (videoHash.isBlank()) return@runCatching null
+                playlist = decryptPlaylist(playlist, videoHash)
+            }
+
+            if (!playlist.contains("#EXTM3U")) {
+                return@runCatching null
+            }
+
+            val absolute = absolutizePlaylist(playlist, interceptedUrl)
+            val key = cacheManifest(absolute, embedUrl)
+
+            ResolvedStream(
+                url = "https://nguonc.local/hls/$key/master.m3u8",
+                referer = embedUrl,
+                type = ExtractorLinkType.M3U8,
+                headers = playerHeaders(embedUrl),
+                manifestKey = key,
+            )
+        }.onFailure {
+            Log.e(
+                "NguonC",
+                "WebView resolver: ${it.javaClass.simpleName}: ${it.message}",
+                it,
+            )
+        }.getOrNull()
     }
 
     private suspend fun resolveStreamC(embedUrl: String, movieUrl: String): ResolvedStream? {
