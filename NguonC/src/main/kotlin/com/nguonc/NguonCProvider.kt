@@ -112,6 +112,134 @@ class NguonCProvider : MainAPI() {
         "Referer" to referer,
     )
 
+
+    private data class BrowserResponse(
+        val code: Int,
+        val text: String,
+        val finalUrl: String,
+    )
+
+    private fun chromeRequestHeaders(
+        referer: String,
+        origin: String? = null,
+        json: Boolean = false,
+        navigation: Boolean = false,
+    ): Map<String, String> {
+        val headers = linkedMapOf(
+            "User-Agent" to browserUserAgent,
+            "Accept" to if (navigation) {
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            } else {
+                "application/json,text/plain,*/*"
+            },
+            "Accept-Language" to "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Sec-CH-UA" to "\"Chromium\";v=\"$chromeMajor\", \"Google Chrome\";v=\"$chromeMajor\", \"Not_A Brand\";v=\"99\"",
+            "Sec-CH-UA-Mobile" to "?1",
+            "Sec-CH-UA-Platform" to "\"Android\"",
+            "Sec-Fetch-Site" to if (origin == null) "cross-site" else "same-origin",
+            "Sec-Fetch-Mode" to if (navigation) "navigate" else "cors",
+            "Sec-Fetch-Dest" to if (navigation) "iframe" else "empty",
+            "Referer" to referer,
+        )
+        if (navigation) headers["Upgrade-Insecure-Requests"] = "1"
+        if (json) headers["Content-Type"] = "application/json"
+        if (!origin.isNullOrBlank()) headers["Origin"] = origin
+        return headers
+    }
+
+    private suspend fun cronetRequest(
+        url: String,
+        method: String,
+        headers: Map<String, String>,
+        body: String? = null,
+    ): BrowserResponse? = withContext(Dispatchers.IO) {
+        val engine = cronetEngine ?: return@withContext null
+        val open = cronetOpen ?: return@withContext null
+
+        runCatching {
+            val connection = open.invoke(engine, URL(url)) as HttpURLConnection
+            try {
+                connection.requestMethod = method
+                connection.instanceFollowRedirects = true
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 20_000
+                for ((key, value) in headers) {
+                    if (!key.equals("Accept-Encoding", true) && !key.equals("Content-Length", true)) {
+                        connection.setRequestProperty(key, value)
+                    }
+                }
+                if (body != null) {
+                    val bytes = body.toByteArray(Charsets.UTF_8)
+                    connection.doOutput = true
+                    connection.setFixedLengthStreamingMode(bytes.size)
+                    connection.outputStream.use { it.write(bytes) }
+                }
+
+                val code = connection.responseCode
+                val stream = if (code >= 400) connection.errorStream else connection.inputStream
+                val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                BrowserResponse(code, text, connection.url.toString())
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrNull()
+    }
+
+    private suspend fun browserGet(
+        url: String,
+        referer: String,
+        navigation: Boolean = false,
+    ): BrowserResponse {
+        val headers = chromeRequestHeaders(
+            referer = referer,
+            navigation = navigation,
+        )
+        cronetRequest(url, "GET", headers)?.let { return it }
+
+        val fallback = app.get(
+            url,
+            headers = headers,
+            referer = referer,
+        )
+        return BrowserResponse(fallback.code, fallback.text, url)
+    }
+
+    private suspend fun browserPostJson(
+        url: String,
+        referer: String,
+        origin: String,
+        json: Map<String, Any>,
+    ): BrowserResponse {
+        val headers = chromeRequestHeaders(
+            referer = referer,
+            origin = origin,
+            json = true,
+        )
+        val body = mapper.writeValueAsString(json)
+        cronetRequest(url, "POST", headers, body)?.let { return it }
+
+        val fallback = app.post(
+            url,
+            json = json,
+            headers = headers,
+            referer = referer,
+        )
+        return BrowserResponse(fallback.code, fallback.text, url)
+    }
+
+    private fun cacheManifest(playlist: String, referer: String): String {
+        val now = System.currentTimeMillis()
+        manifestCache.entries.removeIf { now - it.value.createdAt > manifestTtlMs }
+        while (manifestCache.size >= 32) {
+            manifestCache.entries.minByOrNull { it.value.createdAt }?.let {
+                manifestCache.remove(it.key)
+            } ?: break
+        }
+        val key = UUID.randomUUID().toString()
+        manifestCache[key] = CachedManifest(playlist, referer, now)
+        return key
+    }
+
     private suspend fun api(path: String): JsonNode? {
         val cleanPath = path.trimStart('/')
         for (base in apiBases) {
