@@ -204,7 +204,7 @@ def main():
     ]
     print("PLUGIN_LOG_SNAPSHOT\n" + "\n".join(interesting[-300:]), flush=True)
 
-    if not re.search(r"Loaded plugin\s+NguonC\s+successfully", snapshot, re.I):
+    if not re.search(r"Loaded plugin\s+NguonC(?:\.cs3)?\s+successfully", snapshot, re.I):
         raise RuntimeError("released NguonC.cs3 was not loaded by CloudStream; see PLUGIN_LOG_SNAPSHOT")
     print("ANDROID_PLUGIN_LOADED", flush=True)
 
