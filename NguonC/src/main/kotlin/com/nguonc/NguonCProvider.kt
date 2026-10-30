@@ -392,7 +392,16 @@ class NguonCProvider : MainAPI() {
         return runCatching {
             val embedHtml = app.get(
                 embedUrl,
-                headers = playerHeaders(movieUrl),
+                headers = mapOf(
+                    "User-Agent" to browserUserAgent,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language" to "vi-VN,vi;q=0.9,en;q=0.7",
+                    "Referer" to movieUrl,
+                    "Origin" to originOf(movieUrl),
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                ),
                 referer = movieUrl,
             ).text
 
@@ -439,7 +448,12 @@ class NguonCProvider : MainAPI() {
                     headers = mapOf(
                         "User-Agent" to browserUserAgent,
                         "Accept" to "application/json,text/plain,*/*",
+                        "Content-Type" to "application/json",
                         "Origin" to embedOrigin,
+                        "Referer" to embedUrl,
+                        "Sec-Fetch-Dest" to "empty",
+                        "Sec-Fetch-Mode" to "cors",
+                        "Sec-Fetch-Site" to "same-origin",
                     ),
                     referer = embedUrl,
                 ).text
