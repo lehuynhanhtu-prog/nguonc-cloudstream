@@ -122,6 +122,29 @@ def clear_runtime_permissions(timeout=20):
         print("ANDROID_PERMISSION_ALLOWED", flush=True)
         time.sleep(1)
 
+def finish_first_run_setup(timeout=35):
+    end = time.time() + timeout
+    while time.time() < end:
+        root, _ = dump_ui()
+        if find_node(root, resource_suffix=":id/navigation_home") is not None:
+            return
+        done = find_node(root, resource_suffix=":id/next_btt")
+        if done is not None:
+            tap_node(done)
+            print("ANDROID_SETUP_NEXT_DONE", flush=True)
+            time.sleep(2)
+            continue
+        skip = find_node(root, resource_suffix=":id/skip_btt")
+        if skip is not None:
+            tap_node(skip)
+            print("ANDROID_SETUP_SKIPPED", flush=True)
+            time.sleep(2)
+            continue
+        time.sleep(1)
+    root, xml = dump_ui()
+    print("SETUP_TIMEOUT", xml[-12000:], flush=True)
+    raise RuntimeError("CloudStream first-run setup did not reach Home")
+
 def main():
     apk = os.environ.get("CLOUDSTREAM_APK", "/tmp/cloudstream.apk")
     if not os.path.exists(apk):
@@ -165,8 +188,9 @@ def main():
     adb("shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1", timeout=30)
     clear_runtime_permissions(timeout=8)
 
-    # Confirm we actually reached MainActivity/Home before judging plugin loading.
-    wait_node(timeout=45, resource_suffix=":id/navigation_home")
+    # Finish any remaining first-run setup pages (notably the Extensions/Done page)
+    # and confirm we actually reached MainActivity/Home before judging plugin loading.
+    finish_first_run_setup(timeout=50)
     print("ANDROID_HOME_READY", flush=True)
     time.sleep(8)
 
