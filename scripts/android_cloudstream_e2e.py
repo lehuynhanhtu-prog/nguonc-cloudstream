@@ -165,9 +165,23 @@ def main():
     adb("shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1", timeout=30)
     clear_runtime_permissions(timeout=8)
 
-    logs = wait_log(r"Loaded plugin\s+NguonC\s+successfully", timeout=75)
-    if "Failed to load" in logs and "NguonC" in logs:
-        raise RuntimeError("CloudStream logged a plugin load failure")
+    # Confirm we actually reached MainActivity/Home before judging plugin loading.
+    wait_node(timeout=45, resource_suffix=":id/navigation_home")
+    print("ANDROID_HOME_READY", flush=True)
+    time.sleep(8)
+
+    app_plugin_dir = "/sdcard/Android/data/com.lagradost.cloudstream3/files/plugins"
+    print("APP_PLUGIN_DIR", adb("shell", "ls", "-la", app_plugin_dir, check=False), flush=True)
+
+    snapshot = adb("logcat", "-d", "-v", "brief", check=False, timeout=20)
+    interesting = [
+        line for line in snapshot.splitlines()
+        if re.search(r"PluginManager|NguonC|Loading plugin|Failed to (?:load|copy)|Files in '.+plugins", line, re.I)
+    ]
+    print("PLUGIN_LOG_SNAPSHOT\n" + "\n".join(interesting[-300:]), flush=True)
+
+    if not re.search(r"Loaded plugin\s+NguonC\s+successfully", snapshot, re.I):
+        raise RuntimeError("released NguonC.cs3 was not loaded by CloudStream; see PLUGIN_LOG_SNAPSHOT")
     print("ANDROID_PLUGIN_LOADED", flush=True)
 
     # Restart CloudStream after changing Android's global proxy so all provider/player
