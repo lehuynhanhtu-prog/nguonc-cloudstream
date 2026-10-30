@@ -20,7 +20,14 @@ candidates=(
 
 target="https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1"
 
+failed_file="${FAILED_PROXY_FILE:-/tmp/failed_vn_proxies}"
+touch "$failed_file"
+
 for proxy in "${candidates[@]}"; do
+  if grep -Fxq "$proxy" "$failed_file" 2>/dev/null; then
+    echo "SKIP_FAILED_PROXY $proxy"
+    continue
+  fi
   echo "TRY_PROXY $proxy"
 
   if [[ "$proxy" == socks5h://* ]]; then
