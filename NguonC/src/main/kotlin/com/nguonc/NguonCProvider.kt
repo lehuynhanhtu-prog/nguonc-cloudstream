@@ -2,13 +2,16 @@ package com.nguonc
 
 import android.util.Base64
 import android.webkit.WebSettings
+import android.util.Log
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.net.HttpURLConnection
 import java.net.URI
@@ -30,6 +33,7 @@ class NguonCProvider : MainAPI() {
     override var lang = "vi"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
+    override val loadLinksTimeoutMs: Long? = 60_000L
 
     private val mapper = jacksonObjectMapper()
     private val apiBases = listOf(
@@ -220,9 +224,8 @@ class NguonCProvider : MainAPI() {
 
         val fallback = app.post(
             url,
-            json = json,
-            headers = headers,
-            referer = referer,
+            requestBody = body.toRequestBody("application/json".toMediaType()),
+            headers = headers + ("Referer" to referer),
         )
         return BrowserResponse(fallback.code, fallback.text, url)
     }
@@ -440,10 +443,47 @@ class NguonCProvider : MainAPI() {
         for (source in sources) {
             val item = list.addObject()
             item.put("name", source.server)
+            item.put("key", source.key)
+            item.put("label", source.label)
             item.put("embed", source.embed)
             item.put("direct", source.direct)
         }
         return mapper.writeValueAsString(root)
+    }
+
+    private suspend fun refreshEpisodeSources(
+        referer: String,
+        wantedKey: String?,
+        wantedLabel: String?,
+    ): List<EpisodeSource> {
+        val endpoint = "${referer.trimEnd('/')}/episodes"
+        val response = runCatching {
+            browserGet(
+                url = endpoint,
+                referer = referer,
+            )
+        }.getOrNull() ?: return emptyList()
+
+        if (response.code !in 200..299 || response.text.isBlank()) {
+            Log.w("NguonC", "refreshEpisodeSources HTTP=${response.code}")
+            return emptyList()
+        }
+
+        val json = runCatching { mapper.readTree(response.text) }.getOrNull()
+            ?: return emptyList()
+        val all = parseServers(json.path("servers"))
+        if (all.isEmpty()) return emptyList()
+
+        val exactKey = wantedKey?.takeIf(String::isNotBlank)
+        val exactLabel = wantedLabel?.takeIf(String::isNotBlank)
+
+        return when {
+            exactKey != null -> all.filter { it.key == exactKey }.ifEmpty {
+                all.filter { it.label.equals(exactLabel, ignoreCase = true) }
+            }
+            exactLabel != null -> all.filter { it.label.equals(exactLabel, ignoreCase = true) }
+            else -> all
+        }
     }
 
     override suspend fun loadLinks(
@@ -452,69 +492,104 @@ class NguonCProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val payload = runCatching { mapper.readTree(data) }.getOrNull() ?: return false
+        val payload = runCatching { mapper.readTree(data) }.getOrNull()
+            ?: run {
+                Log.e("NguonC", "loadLinks: invalid payload")
+                return false
+            }
         val referer = payload.value("referer").ifBlank { "$mainUrl/" }
-        val sources = payload.path("sources")
-        if (!sources.isArray) return false
+        val original = payload.path("sources")
+        if (!original.isArray) {
+            Log.e("NguonC", "loadLinks: no source array")
+            return false
+        }
 
-        var found = false
+        val sources = original.map { source ->
+            EpisodeSource(
+                key = source.value("key"),
+                label = source.value("label"),
+                server = source.value("name").ifBlank { name },
+                embed = source.value("embed"),
+                direct = source.value("direct"),
+            )
+        }
 
-        for (source in sources) {
-            val sourceName = source.value("name").ifBlank { name }
-            val direct = source.value("direct")
-            val embed = source.value("embed")
-
-            if (direct.isNotBlank()) {
+        suspend fun emitSource(source: EpisodeSource): Boolean {
+            if (source.direct.isNotBlank()) {
                 callback(
-                    newExtractorLink(name, "$name - $sourceName", direct, type = ExtractorLinkType.M3U8) {
+                    newExtractorLink(
+                        name,
+                        "$name - ${source.server}",
+                        source.direct,
+                        type = ExtractorLinkType.M3U8,
+                    ) {
                         this.referer = referer
                         quality = Qualities.Unknown.value
                         headers = playerHeaders(referer)
                     }
                 )
-                found = true
-                continue
+                return true
             }
 
-            if (embed.isBlank()) continue
+            if (source.embed.isBlank()) return false
 
-            var sourceFound = false
+            resolveStreamC(source.embed, referer)?.let { stream ->
+                callback(
+                    newExtractorLink(
+                        name,
+                        "$name - ${source.server}",
+                        stream.url,
+                        type = stream.type,
+                    ) {
+                        this.referer = stream.referer
+                        quality = Qualities.Unknown.value
+                        headers = stream.headers
+                        if (!stream.manifestKey.isNullOrBlank()) {
+                            extractorData = mapper.writeValueAsString(
+                                mapOf(
+                                    "kind" to "local_manifest",
+                                    "key" to stream.manifestKey,
+                                )
+                            )
+                        }
+                    }
+                )
+                return true
+            }
+
+            var extracted = false
             runCatching {
-                loadExtractor(embed, referer, subtitleCallback) { link ->
-                    sourceFound = true
-                    found = true
+                loadExtractor(source.embed, referer, subtitleCallback) { link ->
+                    extracted = true
                     callback(link)
                 }
+            }.onFailure {
+                Log.w("NguonC", "Generic extractor failed: ${it.javaClass.simpleName}: ${it.message}")
             }
-
-            if (!sourceFound) {
-                resolveStreamC(embed, referer)?.let { stream ->
-                    callback(
-                        newExtractorLink(
-                            name,
-                            "$name - $sourceName",
-                            stream.url,
-                            type = stream.type,
-                        ) {
-                            this.referer = stream.referer
-                            quality = Qualities.Unknown.value
-                            headers = stream.headers
-                            if (!stream.manifestKey.isNullOrBlank()) {
-                                extractorData = mapper.writeValueAsString(
-                                    mapOf(
-                                        "kind" to "local_manifest",
-                                        "key" to stream.manifestKey,
-                                    )
-                                )
-                            }
-                        }
-                    )
-                    found = true
-                }
-            }
+            return extracted
         }
 
-        return found
+        // First attempt the source received with the detail response.
+        for (source in sources) {
+            if (emitSource(source)) return true
+        }
+
+        // Current NguonC website refreshes episode/embed URLs from /episodes.
+        // If every cached/detail source failed, request a fresh source at play time.
+        val refreshed = refreshEpisodeSources(
+            referer = referer,
+            wantedKey = sources.firstOrNull()?.key,
+            wantedLabel = sources.firstOrNull()?.label,
+        )
+        for (source in refreshed) {
+            if (emitSource(source)) return true
+        }
+
+        Log.e(
+            "NguonC",
+            "loadLinks: no playable links original=${sources.size} refreshed=${refreshed.size}",
+        )
+        return false
     }
 
     private suspend fun resolveStreamC(embedUrl: String, movieUrl: String): ResolvedStream? {
@@ -683,6 +758,8 @@ class NguonCProvider : MainAPI() {
                 headers = playerHeaders(embedUrl),
                 manifestKey = key,
             )
+        }.onFailure {
+            Log.e("NguonC", "StreamC resolver: ${it.javaClass.simpleName}: ${it.message}", it)
         }.getOrNull()
     }
 
