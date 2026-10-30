@@ -1,6 +1,7 @@
 package com.nguonc
 
 import android.util.Base64
+import android.webkit.WebSettings
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
@@ -9,9 +10,15 @@ import org.jsoup.Jsoup
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.ResponseBody.Companion.toResponseBody
+import java.net.HttpURLConnection
 import java.net.URI
+import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
@@ -30,9 +37,60 @@ class NguonCProvider : MainAPI() {
         "https://nguonc.com/api",
     )
 
-    private val browserUserAgent =
-        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    private val browserUserAgent: String by lazy {
+        runCatching {
+            val context = com.lagradost.cloudstream3.CloudStreamApp.context
+            WebSettings.getDefaultUserAgent(context)
+                ?.replace("; wv", "")
+                ?.replace(" wv)", ")")
+                ?.replace(Regex(""" Build/[^);]+"""), "")
+                ?.replace(Regex("""Version/\d+\.\d+ """), "")
+                ?.replace(Regex("""\s+"""), " ")
+                ?.trim()
+        }.getOrNull()?.takeIf { it.contains("Chrome/") && it.contains("Android") }
+            ?: "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    }
+
+    private val chromeMajor: String by lazy {
+        Regex("""Chrome/(\d+)""").find(browserUserAgent)?.groupValues?.getOrNull(1) ?: "131"
+    }
+
+    private val cronetEngine: Any? by lazy {
+        runCatching {
+            val context = com.lagradost.cloudstream3.CloudStreamApp.context
+            val builderClass = Class.forName("org.chromium.net.CronetEngine\$Builder")
+            val builder = builderClass
+                .getConstructor(android.content.Context::class.java)
+                .newInstance(context)
+            for (method in listOf("enableHttp2", "enableQuic", "enableBrotli")) {
+                runCatching {
+                    builderClass.getMethod(method, Boolean::class.javaPrimitiveType)
+                        .invoke(builder, true)
+                }
+            }
+            runCatching {
+                builderClass.getMethod("setUserAgent", String::class.java)
+                    .invoke(builder, browserUserAgent)
+            }
+            builderClass.getMethod("build").invoke(builder)
+        }.getOrNull()
+    }
+
+    private val cronetOpen by lazy {
+        runCatching {
+            Class.forName("org.chromium.net.CronetEngine")
+                .getMethod("openConnection", URL::class.java)
+        }.getOrNull()
+    }
+
+    private data class CachedManifest(
+        val playlist: String,
+        val referer: String,
+        val createdAt: Long,
+    )
+
+    private val manifestCache = ConcurrentHashMap<String, CachedManifest>()
+    private val manifestTtlMs = 30L * 60L * 1000L
 
     override val mainPage = mainPageOf(
         "films/phim-moi-cap-nhat" to "Mới cập nhật",
@@ -53,6 +111,134 @@ class NguonCProvider : MainAPI() {
         "Accept" to "*/*",
         "Referer" to referer,
     )
+
+
+    private data class BrowserResponse(
+        val code: Int,
+        val text: String,
+        val finalUrl: String,
+    )
+
+    private fun chromeRequestHeaders(
+        referer: String,
+        origin: String? = null,
+        json: Boolean = false,
+        navigation: Boolean = false,
+    ): Map<String, String> {
+        val headers = linkedMapOf(
+            "User-Agent" to browserUserAgent,
+            "Accept" to if (navigation) {
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            } else {
+                "application/json,text/plain,*/*"
+            },
+            "Accept-Language" to "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Sec-CH-UA" to "\"Chromium\";v=\"$chromeMajor\", \"Google Chrome\";v=\"$chromeMajor\", \"Not_A Brand\";v=\"99\"",
+            "Sec-CH-UA-Mobile" to "?1",
+            "Sec-CH-UA-Platform" to "\"Android\"",
+            "Sec-Fetch-Site" to if (origin == null) "cross-site" else "same-origin",
+            "Sec-Fetch-Mode" to if (navigation) "navigate" else "cors",
+            "Sec-Fetch-Dest" to if (navigation) "iframe" else "empty",
+            "Referer" to referer,
+        )
+        if (navigation) headers["Upgrade-Insecure-Requests"] = "1"
+        if (json) headers["Content-Type"] = "application/json"
+        if (!origin.isNullOrBlank()) headers["Origin"] = origin
+        return headers
+    }
+
+    private suspend fun cronetRequest(
+        url: String,
+        method: String,
+        headers: Map<String, String>,
+        body: String? = null,
+    ): BrowserResponse? = withContext(Dispatchers.IO) {
+        val engine = cronetEngine ?: return@withContext null
+        val open = cronetOpen ?: return@withContext null
+
+        runCatching {
+            val connection = open.invoke(engine, URL(url)) as HttpURLConnection
+            try {
+                connection.requestMethod = method
+                connection.instanceFollowRedirects = true
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 20_000
+                for ((key, value) in headers) {
+                    if (!key.equals("Accept-Encoding", true) && !key.equals("Content-Length", true)) {
+                        connection.setRequestProperty(key, value)
+                    }
+                }
+                if (body != null) {
+                    val bytes = body.toByteArray(Charsets.UTF_8)
+                    connection.doOutput = true
+                    connection.setFixedLengthStreamingMode(bytes.size)
+                    connection.outputStream.use { it.write(bytes) }
+                }
+
+                val code = connection.responseCode
+                val stream = if (code >= 400) connection.errorStream else connection.inputStream
+                val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                BrowserResponse(code, text, connection.url.toString())
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrNull()
+    }
+
+    private suspend fun browserGet(
+        url: String,
+        referer: String,
+        navigation: Boolean = false,
+    ): BrowserResponse {
+        val headers = chromeRequestHeaders(
+            referer = referer,
+            navigation = navigation,
+        )
+        cronetRequest(url, "GET", headers)?.let { return it }
+
+        val fallback = app.get(
+            url,
+            headers = headers,
+            referer = referer,
+        )
+        return BrowserResponse(fallback.code, fallback.text, url)
+    }
+
+    private suspend fun browserPostJson(
+        url: String,
+        referer: String,
+        origin: String,
+        json: Map<String, Any>,
+    ): BrowserResponse {
+        val headers = chromeRequestHeaders(
+            referer = referer,
+            origin = origin,
+            json = true,
+        )
+        val body = mapper.writeValueAsString(json)
+        cronetRequest(url, "POST", headers, body)?.let { return it }
+
+        val fallback = app.post(
+            url,
+            json = json,
+            headers = headers,
+            referer = referer,
+        )
+        return BrowserResponse(fallback.code, fallback.text, url)
+    }
+
+    private fun cacheManifest(playlist: String, referer: String): String {
+        val now = System.currentTimeMillis()
+        manifestCache.entries.removeIf { now - it.value.createdAt > manifestTtlMs }
+        while (manifestCache.size >= 32) {
+            manifestCache.entries.minByOrNull { it.value.createdAt }?.let {
+                manifestCache.remove(it.key)
+            } ?: break
+        }
+        val key = UUID.randomUUID().toString()
+        manifestCache[key] = CachedManifest(playlist, referer, now)
+        return key
+    }
 
     private suspend fun api(path: String): JsonNode? {
         val cleanPath = path.trimStart('/')
@@ -313,12 +499,11 @@ class NguonCProvider : MainAPI() {
                             this.referer = stream.referer
                             quality = Qualities.Unknown.value
                             headers = stream.headers
-                            if (!stream.videoHash.isNullOrBlank()) {
+                            if (!stream.manifestKey.isNullOrBlank()) {
                                 extractorData = mapper.writeValueAsString(
                                     mapOf(
-                                        "kind" to "streamc",
-                                        "videoHash" to stream.videoHash,
-                                        "playlistUrl" to stream.url,
+                                        "kind" to "local_manifest",
+                                        "key" to stream.manifestKey,
                                     )
                                 )
                             }
@@ -334,23 +519,42 @@ class NguonCProvider : MainAPI() {
 
     private suspend fun resolveStreamC(embedUrl: String, movieUrl: String): ResolvedStream? {
         return runCatching {
-            val embedHtml = app.get(
-                embedUrl,
-                headers = playerHeaders(movieUrl),
+            val embedResponse = browserGet(
+                url = embedUrl,
                 referer = movieUrl,
-            ).text
+                navigation = true,
+            )
+            if (embedResponse.code !in 200..299 || embedResponse.text.isBlank()) {
+                return@runCatching null
+            }
+            val embedHtml = embedResponse.text
 
             findDirectMedia(embedHtml)?.let { direct ->
+                val directUrl = URI(embedUrl).resolve(direct).toString()
+                if (directUrl.contains(".m3u8", true)) {
+                    val directPlaylist = browserGet(directUrl, embedUrl)
+                    if (directPlaylist.code in 200..299 && directPlaylist.text.contains("#EXTM3U")) {
+                        val absolute = absolutizePlaylist(directPlaylist.text, directPlaylist.finalUrl)
+                        val key = cacheManifest(absolute, embedUrl)
+                        return@runCatching ResolvedStream(
+                            url = "https://nguonc.local/hls/$key/master.m3u8",
+                            referer = embedUrl,
+                            type = ExtractorLinkType.M3U8,
+                            headers = playerHeaders(embedUrl),
+                            manifestKey = key,
+                        )
+                    }
+                }
                 return@runCatching ResolvedStream(
-                    url = URI(embedUrl).resolve(direct).toString(),
+                    url = directUrl,
                     referer = embedUrl,
-                    type = if (direct.contains(".m3u8", true)) {
+                    type = if (directUrl.contains(".m3u8", true)) {
                         ExtractorLinkType.M3U8
                     } else {
                         ExtractorLinkType.VIDEO
                     },
                     headers = playerHeaders(embedUrl),
-                    videoHash = null,
+                    manifestKey = null,
                 )
             }
 
@@ -367,28 +571,28 @@ class NguonCProvider : MainAPI() {
                 val bootstrapApi = URI(embedUrl).resolve(rawApi).toString()
                 val embedOrigin = originOf(embedUrl)
                 val movieOrigin = originOf(movieUrl)
+                val bootstrapBody = mapOf<String, Any>(
+                    "action" to "bootstrap",
+                    "referrer" to movieUrl.take(4096),
+                    "frame_origins" to listOf(movieOrigin),
+                    "request_grant" to true,
+                    "playlist_format" to "aesgcm-v2",
+                    "pretty_url" to true,
+                    "path_chunks" to true,
+                    "bootstrap_format" to "aesgcm-v1",
+                )
 
-                val responseText = app.post(
-                    bootstrapApi,
-                    json = mapOf(
-                        "action" to "bootstrap",
-                        "referrer" to movieUrl.take(4096),
-                        "frame_origins" to listOf(movieOrigin),
-                        "request_grant" to true,
-                        "playlist_format" to "aesgcm-v2",
-                        "pretty_url" to true,
-                        "path_chunks" to true,
-                        "bootstrap_format" to "aesgcm-v1",
-                    ),
-                    headers = mapOf(
-                        "User-Agent" to browserUserAgent,
-                        "Accept" to "application/json,text/plain,*/*",
-                        "Origin" to embedOrigin,
-                    ),
+                val bootstrapResponse = browserPostJson(
+                    url = bootstrapApi,
                     referer = embedUrl,
-                ).text
+                    origin = embedOrigin,
+                    json = bootstrapBody,
+                )
+                if (bootstrapResponse.code !in 200..299 || bootstrapResponse.text.isBlank()) {
+                    return@runCatching null
+                }
 
-                val envelope = mapper.readTree(responseText)
+                val envelope = mapper.readTree(bootstrapResponse.text)
                 val openedText = if (envelope.value("format") == "aesgcm-v1") {
                     decryptBootstrap(
                         envelope.value("iv"),
@@ -396,7 +600,7 @@ class NguonCProvider : MainAPI() {
                         bootstrapApi,
                     )
                 } else {
-                    responseText
+                    bootstrapResponse.text
                 }
 
                 val opened = mapper.readTree(openedText)
@@ -409,12 +613,31 @@ class NguonCProvider : MainAPI() {
                 }
                 if (videoHash.isBlank()) return@runCatching null
 
-                return@runCatching ResolvedStream(
+                val playlistResponse = browserGet(
                     url = playlistUrl,
+                    referer = embedUrl,
+                )
+                if (playlistResponse.code !in 200..299 || playlistResponse.text.isBlank()) {
+                    return@runCatching null
+                }
+
+                var playlist = playlistResponse.text
+                if (playlist.contains("#ENC-AESGCM")) {
+                    playlist = decryptPlaylist(playlist, videoHash)
+                }
+                if (!playlist.contains("#EXTM3U")) {
+                    return@runCatching null
+                }
+
+                val absolute = absolutizePlaylist(playlist, playlistResponse.finalUrl)
+                val key = cacheManifest(absolute, embedUrl)
+
+                return@runCatching ResolvedStream(
+                    url = "https://nguonc.local/hls/$key/master.m3u8",
                     referer = embedUrl,
                     type = ExtractorLinkType.M3U8,
                     headers = playerHeaders(embedUrl),
-                    videoHash = videoHash,
+                    manifestKey = key,
                 )
             }
 
@@ -433,12 +656,32 @@ class NguonCProvider : MainAPI() {
                 else -> "$origin/${path.trimStart('/')}.m3u8"
             }
 
-            ResolvedStream(
+            val legacyResponse = browserGet(
                 url = legacyUrl,
+                referer = embedUrl,
+            )
+            if (legacyResponse.code !in 200..299 || legacyResponse.text.isBlank()) {
+                return@runCatching null
+            }
+
+            var legacyPlaylist = legacyResponse.text
+            if (legacyPlaylist.contains("#ENC-AESGCM")) {
+                val videoHash = legacy.value("hD")
+                if (videoHash.isBlank()) return@runCatching null
+                legacyPlaylist = decryptPlaylist(legacyPlaylist, videoHash)
+            }
+            if (!legacyPlaylist.contains("#EXTM3U")) {
+                return@runCatching null
+            }
+
+            val absolute = absolutizePlaylist(legacyPlaylist, legacyResponse.finalUrl)
+            val key = cacheManifest(absolute, embedUrl)
+            ResolvedStream(
+                url = "https://nguonc.local/hls/$key/master.m3u8",
                 referer = embedUrl,
                 type = ExtractorLinkType.M3U8,
                 headers = playerHeaders(embedUrl),
-                videoHash = legacy.value("hD").ifBlank { null },
+                manifestKey = key,
             )
         }.getOrNull()
     }
@@ -446,63 +689,43 @@ class NguonCProvider : MainAPI() {
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
         val raw = extractorLink.extractorData ?: return null
         val data = runCatching { mapper.readTree(raw) }.getOrNull() ?: return null
-        if (data.value("kind") != "streamc") return null
+        if (data.value("kind") != "local_manifest") return null
 
-        val videoHash = data.value("videoHash")
-        val playlistUrl = data.value("playlistUrl")
-        if (videoHash.isBlank() || playlistUrl.isBlank()) return null
-
-        val playlistHost = runCatching { URI(playlistUrl).host }.getOrNull() ?: return null
+        val key = data.value("key")
+        val cached = manifestCache[key] ?: return null
+        if (System.currentTimeMillis() - cached.createdAt > manifestTtlMs) {
+            manifestCache.remove(key)
+            return null
+        }
 
         return Interceptor { chain ->
             val original = chain.request()
+
+            if (original.url.host.equals("nguonc.local", ignoreCase = true)) {
+                return@Interceptor okhttp3.Response.Builder()
+                    .request(original)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("Content-Type", "application/vnd.apple.mpegurl")
+                    .body(
+                        cached.playlist.toByteArray(Charsets.UTF_8).toResponseBody(
+                            "application/vnd.apple.mpegurl".toMediaTypeOrNull()
+                        )
+                    )
+                    .build()
+            }
+
             val request = original.newBuilder()
                 .header("User-Agent", browserUserAgent)
                 .apply {
-                    if (original.header("Referer").isNullOrBlank() && extractorLink.referer.isNotBlank()) {
-                        header("Referer", extractorLink.referer)
+                    if (original.header("Referer").isNullOrBlank()) {
+                        header("Referer", cached.referer)
                     }
                 }
                 .build()
 
-            val response = chain.proceed(request)
-            val body = response.body ?: return@Interceptor response
-
-            if (!request.url.host.equals(playlistHost, ignoreCase = true)) {
-                return@Interceptor response
-            }
-
-            val bytes = body.bytes()
-            val text = runCatching { String(bytes, Charsets.UTF_8) }.getOrNull()
-                ?: return@Interceptor response.newBuilder()
-                    .body(bytes.toResponseBody(body.contentType()))
-                    .build()
-
-            if (!text.contains("#ENC-AESGCM")) {
-                return@Interceptor response.newBuilder()
-                    .body(bytes.toResponseBody(body.contentType()))
-                    .build()
-            }
-
-            val decrypted = runCatching {
-                absolutizePlaylist(
-                    decryptPlaylist(text, videoHash),
-                    request.url.toString(),
-                )
-            }.getOrNull() ?: return@Interceptor response.newBuilder()
-                .body(bytes.toResponseBody(body.contentType()))
-                .build()
-
-            response.newBuilder()
-                .removeHeader("Content-Length")
-                .removeHeader("Content-Encoding")
-                .header("Content-Type", "application/vnd.apple.mpegurl")
-                .body(
-                    decrypted.toByteArray(Charsets.UTF_8).toResponseBody(
-                        "application/vnd.apple.mpegurl".toMediaTypeOrNull()
-                    )
-                )
-                .build()
+            chain.proceed(request)
         }
     }
 
@@ -658,5 +881,5 @@ private data class ResolvedStream(
     val referer: String,
     val type: ExtractorLinkType,
     val headers: Map<String, String>,
-    val videoHash: String?,
+    val manifestKey: String?,
 )

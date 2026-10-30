@@ -64,9 +64,11 @@ subprojects {
 
     dependencies {
         val implementation by configurations
-        implementation("com.github.recloudstream.cloudstream:library:v4.8.0")
+        val cloudstream by configurations
+        cloudstream("com.lagradost:cloudstream3:pre-release")
+        implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
         implementation(kotlin("stdlib"))
-        implementation("com.github.Blatzar:NiceHttp:0.4.11")
+        implementation("com.github.Blatzar:NiceHttp:0.4.18")
         implementation("org.jsoup:jsoup:1.18.3")
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
     }
