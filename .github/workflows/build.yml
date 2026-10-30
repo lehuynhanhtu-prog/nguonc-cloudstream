@@ -1,17 +1,15 @@
-name: Build and publish NguonC
+name: Build and live-test NguonC
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: nguonc-${{ github.ref }}
+  group: nguonc-e2e-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -19,12 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - name: Ensure Android SDK 35
         shell: bash
         run: |
@@ -33,134 +29,31 @@ jobs:
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.12'
-
-      - name: Build extension and plugin manifest
+      - name: Build extension
         run: gradle make makePluginsJson --stacktrace
 
-      - name: Collect build outputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf publish
-          mkdir -p publish
-          find . -type f -name '*.cs3' -exec cp {} publish/ \;
-          find . -type f -path '*/build/*.jar' -exec cp {} publish/ \;
-          cp build/plugins.json publish/plugins.json
-          cp repo.json publish/repo.json
-          test -n "$(find publish -name '*.cs3' -print -quit)"
-          test -s publish/plugins.json
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: nguonc-extension-build
-          path: publish/
-
-      - name: Publish builds branch
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: builds
-          publish_dir: ./publish
-          force_orphan: true
-
-  runtime-smoke:
-    if: github.event_name == 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install runtime test dependency
-        run: python -m pip install --disable-pip-version-check cryptography
-      - name: Live NguonC end-to-end test
-        run: python scripts/runtime_e2e.py
-
-
-  runtime-smoke-warp:
-    if: github.event_name == 'pull_request'
+  runtime-smoke-vn-proxy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install runtime test dependency
+      - name: Install runtime dependency
         run: python -m pip install --disable-pip-version-check cryptography
-      - name: Install and connect Cloudflare WARP
+      - name: Find a live Viet Nam egress that NguonC accepts
         shell: bash
         run: |
-          set -euxo pipefail
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update
-          sudo apt-get install -y cloudflare-warp
-          sudo systemctl enable --now warp-svc
-          warp-cli --accept-tos registration new
-          warp-cli --accept-tos mode warp+doh
-          warp-cli --accept-tos connect
-          for i in {1..20}; do
-            if curl -fsS https://www.cloudflare.com/cdn-cgi/trace | grep -q '^warp=on$'; then
-              curl -fsS https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|loc|colo|warp)='
-              exit 0
-            fi
-            sleep 2
-          done
-          warp-cli --accept-tos status || true
-          exit 1
-      - name: Live NguonC end-to-end test over WARP
-        run: python scripts/runtime_e2e.py
-
-  runtime-smoke-vn-container:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Live E2E through an isolated Viet Nam VPN container
+          chmod +x scripts/find_working_vn_proxy.sh
+          scripts/find_working_vn_proxy.sh
+      - name: Run NguonC -> StreamC -> HLS -> media E2E
         shell: bash
         run: |
-          set -euo pipefail
-          docker run --rm --cap-add=NET_ADMIN --device /dev/net/tun \
-            -v "$PWD:/work" -w /work ubuntu:24.04 bash -lc '
-              set -euo pipefail
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install -y ca-certificates curl openvpn python3 python3-pip
-              python3 -m pip install --break-system-packages --disable-pip-version-check cryptography
-              python3 scripts/select_vpngate_vn.py
-              chmod 600 /tmp/vpn-auth.txt
-              connected=0
-              for cfg in /tmp/vpn-*.ovpn; do
-                echo "TRY_VPN $cfg"
-                pkill openvpn || true
-                rm -f /tmp/openvpn.log
-                openvpn --config "$cfg" --auth-user-pass /tmp/vpn-auth.txt \
-                  --connect-timeout 5 --connect-retry-max 1 \
-                  --daemon --log /tmp/openvpn.log || true
-                for i in $(seq 1 8); do
-                  trace="$(curl -fsS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace || true)"
-                  echo "$trace" | grep -E "^(ip|loc|colo|warp)=" || true
-                  if echo "$trace" | grep -q "^loc=VN$"; then
-                    connected=1
-                    break 2
-                  fi
-                  sleep 1
-                done
-                cat /tmp/openvpn.log || true
-              done
-              if [ "$connected" != 1 ]; then
-                echo "NO_WORKING_VN_VPN"
-                exit 1
-              fi
-              python3 scripts/runtime_e2e.py
-            '
+          proxy="$(cat /tmp/working_vn_proxy)"
+          echo "E2E_PROXY $proxy"
+          export ALL_PROXY="$proxy"
+          export all_proxy="$proxy"
+          python scripts/runtime_e2e.py
