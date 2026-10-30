@@ -6,6 +6,9 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.ResponseBody.Companion.toResponseBody
 import java.net.URI
 import java.net.URLEncoder
 import java.security.MessageDigest
@@ -289,14 +292,16 @@ class NguonCProvider : MainAPI() {
 
             if (embed.isBlank()) continue
 
-            val extracted = runCatching {
+            var sourceFound = false
+            runCatching {
                 loadExtractor(embed, referer, subtitleCallback) { link ->
+                    sourceFound = true
                     found = true
                     callback(link)
                 }
-            }.getOrDefault(false)
+            }
 
-            if (!extracted) {
+            if (!sourceFound) {
                 resolveStreamC(embed, referer)?.let { stream ->
                     callback(
                         newExtractorLink(
@@ -308,6 +313,15 @@ class NguonCProvider : MainAPI() {
                             this.referer = stream.referer
                             quality = Qualities.Unknown.value
                             headers = stream.headers
+                            if (!stream.videoHash.isNullOrBlank()) {
+                                extractorData = mapper.writeValueAsString(
+                                    mapOf(
+                                        "kind" to "streamc",
+                                        "videoHash" to stream.videoHash,
+                                        "playlistUrl" to stream.url,
+                                    )
+                                )
+                            }
                         }
                     )
                     found = true
@@ -336,6 +350,7 @@ class NguonCProvider : MainAPI() {
                         ExtractorLinkType.VIDEO
                     },
                     headers = playerHeaders(embedUrl),
+                    videoHash = null,
                 )
             }
 
@@ -388,32 +403,18 @@ class NguonCProvider : MainAPI() {
                 val playlistUrl = opened.path("preissued").value("playlist")
                 if (playlistUrl.isBlank()) return@runCatching null
 
-                var playlist = app.get(
-                    playlistUrl,
-                    headers = playerHeaders(embedUrl),
-                    referer = embedUrl,
-                ).text
-
-                if (playlist.contains("#ENC-AESGCM")) {
-                    val videoHash = opened.value("video").ifBlank {
-                        Regex("""[?&]hash=([0-9a-fA-F]+)""")
-                            .find(embedUrl)?.groupValues?.getOrNull(1).orEmpty()
-                    }
-                    if (videoHash.isBlank()) return@runCatching null
-                    playlist = decryptPlaylist(playlist, videoHash)
+                val videoHash = opened.value("video").ifBlank {
+                    Regex("""[?&]hash=([0-9a-fA-F]+)""")
+                        .find(embedUrl)?.groupValues?.getOrNull(1).orEmpty()
                 }
-
-                val absolute = absolutizePlaylist(playlist, playlistUrl)
-                val encoded = Base64.encodeToString(
-                    absolute.toByteArray(Charsets.UTF_8),
-                    Base64.NO_WRAP,
-                )
+                if (videoHash.isBlank()) return@runCatching null
 
                 return@runCatching ResolvedStream(
-                    url = "data:application/vnd.apple.mpegurl;base64,$encoded",
+                    url = playlistUrl,
                     referer = embedUrl,
                     type = ExtractorLinkType.M3U8,
                     headers = playerHeaders(embedUrl),
+                    videoHash = videoHash,
                 )
             }
 
@@ -432,37 +433,77 @@ class NguonCProvider : MainAPI() {
                 else -> "$origin/${path.trimStart('/')}.m3u8"
             }
 
-            var legacyPlaylist = app.get(
-                legacyUrl,
-                headers = playerHeaders(embedUrl),
-                referer = embedUrl,
-            ).text
-
-            if (legacyPlaylist.contains("#ENC-AESGCM")) {
-                val videoHash = legacy.value("hD")
-                if (videoHash.isBlank()) return@runCatching null
-                legacyPlaylist = decryptPlaylist(legacyPlaylist, videoHash)
-                legacyPlaylist = absolutizePlaylist(legacyPlaylist, legacyUrl)
-
-                val encoded = Base64.encodeToString(
-                    legacyPlaylist.toByteArray(Charsets.UTF_8),
-                    Base64.NO_WRAP,
-                )
-                return@runCatching ResolvedStream(
-                    url = "data:application/vnd.apple.mpegurl;base64,$encoded",
-                    referer = embedUrl,
-                    type = ExtractorLinkType.M3U8,
-                    headers = playerHeaders(embedUrl),
-                )
-            }
-
             ResolvedStream(
                 url = legacyUrl,
                 referer = embedUrl,
                 type = ExtractorLinkType.M3U8,
                 headers = playerHeaders(embedUrl),
+                videoHash = legacy.value("hD").ifBlank { null },
             )
         }.getOrNull()
+    }
+
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        val raw = extractorLink.extractorData ?: return null
+        val data = runCatching { mapper.readTree(raw) }.getOrNull() ?: return null
+        if (data.value("kind") != "streamc") return null
+
+        val videoHash = data.value("videoHash")
+        val playlistUrl = data.value("playlistUrl")
+        if (videoHash.isBlank() || playlistUrl.isBlank()) return null
+
+        val playlistHost = runCatching { URI(playlistUrl).host }.getOrNull() ?: return null
+
+        return Interceptor { chain ->
+            val original = chain.request()
+            val request = original.newBuilder()
+                .header("User-Agent", browserUserAgent)
+                .apply {
+                    if (original.header("Referer").isNullOrBlank() && extractorLink.referer.isNotBlank()) {
+                        header("Referer", extractorLink.referer)
+                    }
+                }
+                .build()
+
+            val response = chain.proceed(request)
+            val body = response.body ?: return@Interceptor response
+
+            if (!request.url.host.equals(playlistHost, ignoreCase = true)) {
+                return@Interceptor response
+            }
+
+            val bytes = body.bytes()
+            val text = runCatching { String(bytes, Charsets.UTF_8) }.getOrNull()
+                ?: return@Interceptor response.newBuilder()
+                    .body(bytes.toResponseBody(body.contentType()))
+                    .build()
+
+            if (!text.contains("#ENC-AESGCM")) {
+                return@Interceptor response.newBuilder()
+                    .body(bytes.toResponseBody(body.contentType()))
+                    .build()
+            }
+
+            val decrypted = runCatching {
+                absolutizePlaylist(
+                    decryptPlaylist(text, videoHash),
+                    request.url.toString(),
+                )
+            }.getOrNull() ?: return@Interceptor response.newBuilder()
+                .body(bytes.toResponseBody(body.contentType()))
+                .build()
+
+            response.newBuilder()
+                .removeHeader("Content-Length")
+                .removeHeader("Content-Encoding")
+                .header("Content-Type", "application/vnd.apple.mpegurl")
+                .body(
+                    decrypted.toByteArray(Charsets.UTF_8).toResponseBody(
+                        "application/vnd.apple.mpegurl".toMediaTypeOrNull()
+                    )
+                )
+                .build()
+        }
     }
 
     private fun decryptBootstrap(ivHex: String, dataBase64: String, apiUrl: String): String {
@@ -617,4 +658,5 @@ private data class ResolvedStream(
     val referer: String,
     val type: ExtractorLinkType,
     val headers: Map<String, String>,
+    val videoHash: String?,
 )
