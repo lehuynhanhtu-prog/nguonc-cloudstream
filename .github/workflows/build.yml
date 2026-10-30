@@ -139,19 +139,27 @@ jobs:
               python3 -m pip install --break-system-packages --disable-pip-version-check cryptography
               python3 scripts/select_vpngate_vn.py
               chmod 600 /tmp/vpn-auth.txt
-              openvpn --config /tmp/vpn.ovpn --auth-user-pass /tmp/vpn-auth.txt --daemon --log /tmp/openvpn.log
-              ok=0
-              for i in $(seq 1 30); do
-                trace="$(curl -fsS --max-time 10 https://www.cloudflare.com/cdn-cgi/trace || true)"
-                echo "$trace" | grep -E "^(ip|loc|colo|warp)=" || true
-                if echo "$trace" | grep -q "^loc=VN$"; then
-                  ok=1
-                  break
-                fi
-                sleep 2
-              done
-              if [ "$ok" != 1 ]; then
+              connected=0
+              for cfg in /tmp/vpn-*.ovpn; do
+                echo "TRY_VPN $cfg"
+                pkill openvpn || true
+                rm -f /tmp/openvpn.log
+                openvpn --config "$cfg" --auth-user-pass /tmp/vpn-auth.txt \
+                  --connect-timeout 5 --connect-retry-max 1 \
+                  --daemon --log /tmp/openvpn.log || true
+                for i in $(seq 1 8); do
+                  trace="$(curl -fsS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace || true)"
+                  echo "$trace" | grep -E "^(ip|loc|colo|warp)=" || true
+                  if echo "$trace" | grep -q "^loc=VN$"; then
+                    connected=1
+                    break 2
+                  fi
+                  sleep 1
+                done
                 cat /tmp/openvpn.log || true
+              done
+              if [ "$connected" != 1 ]; then
+                echo "NO_WORKING_VN_VPN"
                 exit 1
               fi
               python3 scripts/runtime_e2e.py
