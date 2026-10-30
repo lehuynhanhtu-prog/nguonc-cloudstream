@@ -22,6 +22,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
@@ -198,14 +199,27 @@ class NguonCProvider : MainAPI() {
             referer = referer,
             navigation = navigation,
         )
-        cronetRequest(url, "GET", headers)?.let { return it }
 
-        val fallback = app.get(
-            url,
-            headers = headers,
-            referer = referer,
-        )
-        return BrowserResponse(fallback.code, fallback.text, url)
+        // CloudStream's NiceHttp/OkHttp stack already negotiates HTTP/2 and
+        // follows the same system network/proxy settings as the rest of the app.
+        // Prefer it so StreamC does not bypass Android's active network route.
+        val primary = withTimeoutOrNull(18_000L) {
+            runCatching {
+                val response = app.get(
+                    url,
+                    headers = headers,
+                    referer = referer,
+                )
+                BrowserResponse(response.code, response.text, url)
+            }.getOrNull()
+        }
+        if (primary != null) return primary
+
+        // Cronet is only a fallback. It can ignore some Android proxy routes,
+        // which previously caused loadLinks() to hang forever on the embed URL.
+        return withTimeoutOrNull(18_000L) {
+            cronetRequest(url, "GET", headers)
+        } ?: BrowserResponse(599, "", url)
     }
 
     private suspend fun browserPostJson(
@@ -220,14 +234,22 @@ class NguonCProvider : MainAPI() {
             json = true,
         )
         val body = mapper.writeValueAsString(json)
-        cronetRequest(url, "POST", headers, body)?.let { return it }
 
-        val fallback = app.post(
-            url,
-            requestBody = body.toRequestBody("application/json".toMediaType()),
-            headers = headers + ("Referer" to referer),
-        )
-        return BrowserResponse(fallback.code, fallback.text, url)
+        val primary = withTimeoutOrNull(18_000L) {
+            runCatching {
+                val response = app.post(
+                    url,
+                    requestBody = body.toRequestBody("application/json".toMediaType()),
+                    headers = headers + ("Referer" to referer),
+                )
+                BrowserResponse(response.code, response.text, url)
+            }.getOrNull()
+        }
+        if (primary != null) return primary
+
+        return withTimeoutOrNull(18_000L) {
+            cronetRequest(url, "POST", headers, body)
+        } ?: BrowserResponse(599, "", url)
     }
 
     private fun cacheManifest(playlist: String, referer: String): String {
