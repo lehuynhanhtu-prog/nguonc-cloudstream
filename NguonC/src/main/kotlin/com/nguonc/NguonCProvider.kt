@@ -2,13 +2,17 @@ package com.nguonc
 
 import android.util.Base64
 import android.webkit.WebSettings
+import android.util.Log
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.net.HttpURLConnection
 import java.net.URI
@@ -19,6 +23,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
@@ -29,7 +34,9 @@ class NguonCProvider : MainAPI() {
     override var name = "NguonC"
     override var lang = "vi"
     override val hasMainPage = true
+    override val usesWebView = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
+    override val loadLinksTimeoutMs: Long? = 90_000L
 
     private val mapper = jacksonObjectMapper()
     private val apiBases = listOf(
@@ -194,14 +201,27 @@ class NguonCProvider : MainAPI() {
             referer = referer,
             navigation = navigation,
         )
-        cronetRequest(url, "GET", headers)?.let { return it }
 
-        val fallback = app.get(
-            url,
-            headers = headers,
-            referer = referer,
-        )
-        return BrowserResponse(fallback.code, fallback.text, url)
+        // CloudStream's NiceHttp/OkHttp stack already negotiates HTTP/2 and
+        // follows the same system network/proxy settings as the rest of the app.
+        // Prefer it so StreamC does not bypass Android's active network route.
+        val primary = withTimeoutOrNull(18_000L) {
+            runCatching {
+                val response = app.get(
+                    url,
+                    headers = headers,
+                    referer = referer,
+                )
+                BrowserResponse(response.code, response.text, url)
+            }.getOrNull()
+        }
+        if (primary != null) return primary
+
+        // Cronet is only a fallback. It can ignore some Android proxy routes,
+        // which previously caused loadLinks() to hang forever on the embed URL.
+        return withTimeoutOrNull(18_000L) {
+            cronetRequest(url, "GET", headers)
+        } ?: BrowserResponse(599, "", url)
     }
 
     private suspend fun browserPostJson(
@@ -216,15 +236,22 @@ class NguonCProvider : MainAPI() {
             json = true,
         )
         val body = mapper.writeValueAsString(json)
-        cronetRequest(url, "POST", headers, body)?.let { return it }
 
-        val fallback = app.post(
-            url,
-            json = json,
-            headers = headers,
-            referer = referer,
-        )
-        return BrowserResponse(fallback.code, fallback.text, url)
+        val primary = withTimeoutOrNull(18_000L) {
+            runCatching {
+                val response = app.post(
+                    url,
+                    requestBody = body.toRequestBody("application/json".toMediaType()),
+                    headers = headers + ("Referer" to referer),
+                )
+                BrowserResponse(response.code, response.text, url)
+            }.getOrNull()
+        }
+        if (primary != null) return primary
+
+        return withTimeoutOrNull(18_000L) {
+            cronetRequest(url, "POST", headers, body)
+        } ?: BrowserResponse(599, "", url)
     }
 
     private fun cacheManifest(playlist: String, referer: String): String {
@@ -440,10 +467,47 @@ class NguonCProvider : MainAPI() {
         for (source in sources) {
             val item = list.addObject()
             item.put("name", source.server)
+            item.put("key", source.key)
+            item.put("label", source.label)
             item.put("embed", source.embed)
             item.put("direct", source.direct)
         }
         return mapper.writeValueAsString(root)
+    }
+
+    private suspend fun refreshEpisodeSources(
+        referer: String,
+        wantedKey: String?,
+        wantedLabel: String?,
+    ): List<EpisodeSource> {
+        val endpoint = "${referer.trimEnd('/')}/episodes"
+        val response = runCatching {
+            browserGet(
+                url = endpoint,
+                referer = referer,
+            )
+        }.getOrNull() ?: return emptyList()
+
+        if (response.code !in 200..299 || response.text.isBlank()) {
+            Log.w("NguonC", "refreshEpisodeSources HTTP=${response.code}")
+            return emptyList()
+        }
+
+        val json = runCatching { mapper.readTree(response.text) }.getOrNull()
+            ?: return emptyList()
+        val all = parseServers(json.path("servers"))
+        if (all.isEmpty()) return emptyList()
+
+        val exactKey = wantedKey?.takeIf(String::isNotBlank)
+        val exactLabel = wantedLabel?.takeIf(String::isNotBlank)
+
+        return when {
+            exactKey != null -> all.filter { it.key == exactKey }.ifEmpty {
+                all.filter { it.label.equals(exactLabel, ignoreCase = true) }
+            }
+            exactLabel != null -> all.filter { it.label.equals(exactLabel, ignoreCase = true) }
+            else -> all
+        }
     }
 
     override suspend fun loadLinks(
@@ -452,69 +516,171 @@ class NguonCProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val payload = runCatching { mapper.readTree(data) }.getOrNull() ?: return false
+        val payload = runCatching { mapper.readTree(data) }.getOrNull()
+            ?: run {
+                Log.e("NguonC", "loadLinks: invalid payload")
+                return false
+            }
         val referer = payload.value("referer").ifBlank { "$mainUrl/" }
-        val sources = payload.path("sources")
-        if (!sources.isArray) return false
+        val original = payload.path("sources")
+        if (!original.isArray) {
+            Log.e("NguonC", "loadLinks: no source array")
+            return false
+        }
 
-        var found = false
+        val sources = original.map { source ->
+            EpisodeSource(
+                key = source.value("key"),
+                label = source.value("label"),
+                server = source.value("name").ifBlank { name },
+                embed = source.value("embed"),
+                direct = source.value("direct"),
+            )
+        }
 
-        for (source in sources) {
-            val sourceName = source.value("name").ifBlank { name }
-            val direct = source.value("direct")
-            val embed = source.value("embed")
-
-            if (direct.isNotBlank()) {
+        suspend fun emitSource(source: EpisodeSource): Boolean {
+            Log.i("NguonC", "emitSource server=${source.server} direct=${source.direct.isNotBlank()} embed=${source.embed.take(120)}")
+            if (source.direct.isNotBlank()) {
                 callback(
-                    newExtractorLink(name, "$name - $sourceName", direct, type = ExtractorLinkType.M3U8) {
+                    newExtractorLink(
+                        name,
+                        "$name - ${source.server}",
+                        source.direct,
+                        type = ExtractorLinkType.M3U8,
+                    ) {
                         this.referer = referer
                         quality = Qualities.Unknown.value
                         headers = playerHeaders(referer)
                     }
                 )
-                found = true
-                continue
+                return true
             }
 
-            if (embed.isBlank()) continue
+            if (source.embed.isBlank()) return false
 
-            var sourceFound = false
+            val stream = resolveStreamCWithWebView(source.embed, referer)
+                ?: resolveStreamC(source.embed, referer)
+
+            stream?.let { stream ->
+                Log.i("NguonC", "resolved stream url=${stream.url} manifestKey=${stream.manifestKey}")
+                callback(
+                    newExtractorLink(
+                        name,
+                        "$name - ${source.server}",
+                        stream.url,
+                        type = stream.type,
+                    ) {
+                        this.referer = stream.referer
+                        quality = Qualities.Unknown.value
+                        headers = stream.headers
+                        if (!stream.manifestKey.isNullOrBlank()) {
+                            extractorData = mapper.writeValueAsString(
+                                mapOf(
+                                    "kind" to "local_manifest",
+                                    "key" to stream.manifestKey,
+                                )
+                            )
+                        }
+                    }
+                )
+                Log.i("NguonC", "callback emitted custom stream")
+                return true
+            }
+
+            Log.w("NguonC", "custom StreamC resolver returned null; trying generic extractor")
+            var extracted = false
             runCatching {
-                loadExtractor(embed, referer, subtitleCallback) { link ->
-                    sourceFound = true
-                    found = true
+                loadExtractor(source.embed, referer, subtitleCallback) { link ->
+                    extracted = true
                     callback(link)
                 }
+            }.onFailure {
+                Log.w("NguonC", "Generic extractor failed: ${it.javaClass.simpleName}: ${it.message}")
             }
-
-            if (!sourceFound) {
-                resolveStreamC(embed, referer)?.let { stream ->
-                    callback(
-                        newExtractorLink(
-                            name,
-                            "$name - $sourceName",
-                            stream.url,
-                            type = stream.type,
-                        ) {
-                            this.referer = stream.referer
-                            quality = Qualities.Unknown.value
-                            headers = stream.headers
-                            if (!stream.manifestKey.isNullOrBlank()) {
-                                extractorData = mapper.writeValueAsString(
-                                    mapOf(
-                                        "kind" to "local_manifest",
-                                        "key" to stream.manifestKey,
-                                    )
-                                )
-                            }
-                        }
-                    )
-                    found = true
-                }
-            }
+            Log.i("NguonC", "generic extractor emitted=$extracted")
+            return extracted
         }
 
-        return found
+        // First attempt the source received with the detail response.
+        for (source in sources) {
+            if (emitSource(source)) return true
+        }
+
+        // Current NguonC website refreshes episode/embed URLs from /episodes.
+        // If every cached/detail source failed, request a fresh source at play time.
+        val refreshed = refreshEpisodeSources(
+            referer = referer,
+            wantedKey = sources.firstOrNull()?.key,
+            wantedLabel = sources.firstOrNull()?.label,
+        )
+        for (source in refreshed) {
+            if (emitSource(source)) return true
+        }
+
+        Log.e(
+            "NguonC",
+            "loadLinks: no playable links original=${sources.size} refreshed=${refreshed.size}",
+        )
+        return false
+    }
+
+    private suspend fun resolveStreamCWithWebView(
+        embedUrl: String,
+        movieUrl: String,
+    ): ResolvedStream? {
+        return runCatching {
+            Log.i("NguonC", "trying WebView resolver for $embedUrl")
+            val resolver = WebViewResolver(
+                interceptUrl = Regex(
+                    """(?i)(?:\\.m3u8(?:[?#]|$)|/[^?#]*playlist[^?#]*(?:[?#]|$))"""
+                ),
+                userAgent = null,
+                useOkhttp = false,
+                timeout = 30_000L,
+            )
+
+            val response = app.get(
+                url = embedUrl,
+                referer = movieUrl,
+                interceptor = resolver,
+                headers = mapOf("Referer" to movieUrl),
+            )
+
+            val interceptedUrl = response.url
+            var playlist = response.text
+            Log.i(
+                "NguonC",
+                "WebView result url=$interceptedUrl bytes=${playlist.length}",
+            )
+
+            if (playlist.contains("#ENC-AESGCM")) {
+                val videoHash = Regex("""[?&]hash=([0-9a-fA-F]+)""")
+                    .find(embedUrl)?.groupValues?.getOrNull(1).orEmpty()
+                if (videoHash.isBlank()) return@runCatching null
+                playlist = decryptPlaylist(playlist, videoHash)
+            }
+
+            if (!playlist.contains("#EXTM3U")) {
+                return@runCatching null
+            }
+
+            val absolute = absolutizePlaylist(playlist, interceptedUrl)
+            val key = cacheManifest(absolute, embedUrl)
+
+            ResolvedStream(
+                url = "https://nguonc.local/hls/$key/master.m3u8",
+                referer = embedUrl,
+                type = ExtractorLinkType.M3U8,
+                headers = playerHeaders(embedUrl),
+                manifestKey = key,
+            )
+        }.onFailure {
+            Log.e(
+                "NguonC",
+                "WebView resolver: ${it.javaClass.simpleName}: ${it.message}",
+                it,
+            )
+        }.getOrNull()
     }
 
     private suspend fun resolveStreamC(embedUrl: String, movieUrl: String): ResolvedStream? {
@@ -524,7 +690,9 @@ class NguonCProvider : MainAPI() {
                 referer = movieUrl,
                 navigation = true,
             )
+            Log.i("NguonC", "embed HTTP=${embedResponse.code} bytes=${embedResponse.text.length} final=${embedResponse.finalUrl}")
             if (embedResponse.code !in 200..299 || embedResponse.text.isBlank()) {
+                Log.w("NguonC", "embed fetch failed")
                 return@runCatching null
             }
             val embedHtml = embedResponse.text
@@ -588,7 +756,9 @@ class NguonCProvider : MainAPI() {
                     origin = embedOrigin,
                     json = bootstrapBody,
                 )
+                Log.i("NguonC", "bootstrap HTTP=${bootstrapResponse.code} bytes=${bootstrapResponse.text.length}")
                 if (bootstrapResponse.code !in 200..299 || bootstrapResponse.text.isBlank()) {
+                    Log.w("NguonC", "bootstrap failed body=${bootstrapResponse.text.take(300)}")
                     return@runCatching null
                 }
 
@@ -605,7 +775,11 @@ class NguonCProvider : MainAPI() {
 
                 val opened = mapper.readTree(openedText)
                 val playlistUrl = opened.path("preissued").value("playlist")
-                if (playlistUrl.isBlank()) return@runCatching null
+                Log.i("NguonC", "bootstrap opened playlist=${playlistUrl.take(180)} turnstile=${opened.path("turnstileEnabled").asBoolean(false)}")
+                if (playlistUrl.isBlank()) {
+                    Log.w("NguonC", "bootstrap has no playlist")
+                    return@runCatching null
+                }
 
                 val videoHash = opened.value("video").ifBlank {
                     Regex("""[?&]hash=([0-9a-fA-F]+)""")
@@ -617,7 +791,9 @@ class NguonCProvider : MainAPI() {
                     url = playlistUrl,
                     referer = embedUrl,
                 )
+                Log.i("NguonC", "playlist HTTP=${playlistResponse.code} bytes=${playlistResponse.text.length} encrypted=${playlistResponse.text.contains("#ENC-AESGCM")}")
                 if (playlistResponse.code !in 200..299 || playlistResponse.text.isBlank()) {
+                    Log.w("NguonC", "playlist fetch failed")
                     return@runCatching null
                 }
 
@@ -625,7 +801,9 @@ class NguonCProvider : MainAPI() {
                 if (playlist.contains("#ENC-AESGCM")) {
                     playlist = decryptPlaylist(playlist, videoHash)
                 }
+                Log.i("NguonC", "playlist decrypted extm3u=${playlist.contains("#EXTM3U")} bytes=${playlist.length}")
                 if (!playlist.contains("#EXTM3U")) {
+                    Log.w("NguonC", "decrypted playlist invalid")
                     return@runCatching null
                 }
 
@@ -683,6 +861,8 @@ class NguonCProvider : MainAPI() {
                 headers = playerHeaders(embedUrl),
                 manifestKey = key,
             )
+        }.onFailure {
+            Log.e("NguonC", "StreamC resolver: ${it.javaClass.simpleName}: ${it.message}", it)
         }.getOrNull()
     }
 
