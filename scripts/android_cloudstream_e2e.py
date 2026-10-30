@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import base64
 import os
 import re
 import subprocess
@@ -223,14 +224,18 @@ def main():
     wait_log(r"Loaded plugin\s+NguonC(?:\.cs3)?\s+successfully", timeout=45)
     print("ANDROID_PLUGIN_RELOADED_WITH_PROXY", flush=True)
 
-    # Now open a real NguonC title and explicitly identify the provider. The extra is
-    # propagated by AccountSelectActivity2 into MainActivity as API_NAME_EXTRA_KEY.
+    # Open the result using CloudStream's own csshare deep link. This encodes both
+    # apiName and URL, so MainActivity calls loadResult(url, "NguonC", ...) directly
+    # instead of relying on URL/provider matching during asynchronous startup.
+    api_b64 = base64.b64encode(b"NguonC").decode("ascii")
+    url_b64 = base64.b64encode(MOVIE_URL.encode("utf-8")).decode("ascii")
+    share_uri = f"csshare:{api_b64}?{url_b64}"
+    print("ANDROID_CSSHARE_URI", share_uri, flush=True)
     adb(
         "shell", "am", "start", "-W",
         "-n", ACCOUNT_ACTIVITY,
         "-a", "android.intent.action.VIEW",
-        "-d", MOVIE_URL,
-        "--es", "API_NAME_EXTRA_KEY", "NguonC",
+        "-d", share_uri,
         timeout=45,
     )
 
@@ -250,6 +255,9 @@ def main():
             raise RuntimeError("CloudStream result page entered error state")
         time.sleep(1)
     if play is None:
+        root, xml = dump_ui()
+        print("RESULT_PAGE_TIMEOUT_UI", xml[-20000:], flush=True)
+        print("FOCUSED_ACTIVITY", adb("shell", "dumpsys", "activity", "activities", check=False, timeout=20)[-12000:], flush=True)
         raise RuntimeError("real NguonC title did not expose a play button in CloudStream")
 
     print("ANDROID_PROVIDER_METADATA_AND_EPISODES_OK", flush=True)
