@@ -120,3 +120,76 @@ jobs:
           exit 1
       - name: Live NguonC end-to-end test over WARP
         run: python scripts/runtime_e2e.py
+
+  runtime-smoke-vn-vpn:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check cryptography
+          sudo apt-get update
+          sudo apt-get install -y openvpn
+      - name: Connect to a public VPN Gate relay in Viet Nam
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --max-time 30 https://www.vpngate.net/api/iphone/ -o /tmp/vpngate.csv
+          python - <<'PY'
+          import base64, csv, io
+          raw = open('/tmp/vpngate.csv', encoding='utf-8-sig', errors='replace').read()
+          rows = []
+          for line in raw.splitlines():
+              if not line or line.startswith('*'):
+                  continue
+              if line.startswith('#HostName'):
+                  header = line[1:].split(',')
+                  continue
+              if 'header' not in globals():
+                  continue
+              try:
+                  vals = next(csv.reader([line]))
+              except Exception:
+                  continue
+              if len(vals) != len(header):
+                  continue
+              d = dict(zip(header, vals))
+              if d.get('CountryShort') == 'VN' and d.get('OpenVPN_ConfigData_Base64'):
+                  try:
+                      d['_score'] = int(d.get('Score') or 0)
+                  except Exception:
+                      d['_score'] = 0
+                  rows.append(d)
+          if not rows:
+              raise SystemExit('No Viet Nam VPN Gate OpenVPN relay available')
+          rows.sort(key=lambda x: x['_score'], reverse=True)
+          d = rows[0]
+          cfg = base64.b64decode(d['OpenVPN_ConfigData_Base64']).decode('utf-8', 'replace')
+          cfg = cfg.replace('auth-user-pass\n', 'auth-user-pass /tmp/vpn-auth.txt\n')
+          open('/tmp/vpn.ovpn','w').write(cfg)
+          open('/tmp/vpn-auth.txt','w').write('vpn\nvpn\n')
+          print('VPN_SELECTED', d.get('HostName'), d.get('IP'), d.get('Score'), d.get('Speed'))
+          PY
+          chmod 600 /tmp/vpn-auth.txt
+          sudo openvpn --config /tmp/vpn.ovpn --auth-user-pass /tmp/vpn-auth.txt --daemon --log /tmp/openvpn.log
+          ok=0
+          for i in {1..30}; do
+            trace="$(curl -fsS --max-time 10 https://www.cloudflare.com/cdn-cgi/trace || true)"
+            echo "$trace" | grep -E '^(ip|loc|colo|warp)=' || true
+            if echo "$trace" | grep -q '^loc=VN$'; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ok" != 1 ]; then
+            cat /tmp/openvpn.log || true
+            exit 1
+          fi
+      - name: Live NguonC end-to-end test from Viet Nam
+        run: python scripts/runtime_e2e.py
