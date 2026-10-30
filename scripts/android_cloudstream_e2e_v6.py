@@ -286,6 +286,13 @@ def main():
 
     print("ANDROID_PROVIDER_METADATA_AND_EPISODES_OK", flush=True)
     print("ANDROID_PLAY_TARGET", launch.attrib.get("resource-id", ""), launch.attrib.get("text", ""), flush=True)
+
+    # Keep the verified VN proxy only for NguonC catalog/detail calls. StreamC
+    # needs a clean HTTP/2/TLS path and public proxies often break signed playlists.
+    adb("shell", "settings", "put", "global", "http_proxy", ":0", check=False)
+    print("ANDROID_PROXY_DISABLED_FOR_STREAMC", flush=True)
+    time.sleep(2)
+
     adb("logcat", "-c", check=False)
     tap_node(launch)
 
