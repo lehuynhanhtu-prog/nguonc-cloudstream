@@ -558,8 +558,8 @@ class NguonCProvider : MainAPI() {
 
             if (source.embed.isBlank()) return false
 
-            val stream = resolveStreamCWithWebView(source.embed, referer)
-                ?: resolveStreamC(source.embed, referer)
+            val stream = resolveStreamC(source.embed, referer)
+                ?: resolveStreamCWithWebView(source.embed, referer)
 
             stream?.let { stream ->
                 Log.i("NguonC", "resolved stream url=${stream.url} manifestKey=${stream.manifestKey}")
@@ -573,13 +573,24 @@ class NguonCProvider : MainAPI() {
                         this.referer = stream.referer
                         quality = Qualities.Unknown.value
                         headers = stream.headers
-                        if (!stream.manifestKey.isNullOrBlank()) {
-                            extractorData = mapper.writeValueAsString(
-                                mapOf(
-                                    "kind" to "local_manifest",
-                                    "key" to stream.manifestKey,
+                        when {
+                            !stream.manifestKey.isNullOrBlank() -> {
+                                extractorData = mapper.writeValueAsString(
+                                    mapOf(
+                                        "kind" to "local_manifest",
+                                        "key" to stream.manifestKey,
+                                    )
                                 )
-                            )
+                            }
+                            !stream.videoHash.isNullOrBlank() -> {
+                                extractorData = mapper.writeValueAsString(
+                                    mapOf(
+                                        "kind" to "streamc_remote",
+                                        "videoHash" to stream.videoHash,
+                                        "playlistUrl" to stream.url,
+                                    )
+                                )
+                            }
                         }
                     }
                 )
@@ -787,35 +798,25 @@ class NguonCProvider : MainAPI() {
                 }
                 if (videoHash.isBlank()) return@runCatching null
 
-                val playlistResponse = browserGet(
-                    url = playlistUrl,
-                    referer = embedUrl,
-                )
-                Log.i("NguonC", "playlist HTTP=${playlistResponse.code} bytes=${playlistResponse.text.length} encrypted=${playlistResponse.text.contains("#ENC-AESGCM")}")
-                if (playlistResponse.code !in 200..299 || playlistResponse.text.isBlank()) {
-                    Log.w("NguonC", "playlist fetch failed")
+                val embedHost = runCatching { URI(embedUrl).host }.getOrNull()
+                val playlistHost = runCatching { URI(playlistUrl).host }.getOrNull()
+                if (embedHost.isNullOrBlank() || playlistHost != embedHost) {
+                    Log.w("NguonC", "bootstrap playlist host mismatch")
                     return@runCatching null
                 }
 
-                var playlist = playlistResponse.text
-                if (playlist.contains("#ENC-AESGCM")) {
-                    playlist = decryptPlaylist(playlist, videoHash)
-                }
-                Log.i("NguonC", "playlist decrypted extm3u=${playlist.contains("#EXTM3U")} bytes=${playlist.length}")
-                if (!playlist.contains("#EXTM3U")) {
-                    Log.w("NguonC", "decrypted playlist invalid")
-                    return@runCatching null
-                }
-
-                val absolute = absolutizePlaylist(playlist, playlistResponse.finalUrl)
-                val key = cacheManifest(absolute, embedUrl)
-
+                // Do not fetch the playlist inside loadLinks(). StreamC may stall
+                // or challenge this second request, which previously made CloudStream
+                // report "No links found" even though bootstrap already returned a
+                // valid playlist URL. Emit it immediately and decrypt in the player's
+                // OkHttp interceptor when Media3 actually requests the manifest.
                 return@runCatching ResolvedStream(
-                    url = "https://nguonc.local/hls/$key/master.m3u8",
+                    url = playlistUrl,
                     referer = embedUrl,
                     type = ExtractorLinkType.M3U8,
                     headers = playerHeaders(embedUrl),
-                    manifestKey = key,
+                    manifestKey = null,
+                    videoHash = videoHash,
                 )
             }
 
@@ -869,43 +870,117 @@ class NguonCProvider : MainAPI() {
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
         val raw = extractorLink.extractorData ?: return null
         val data = runCatching { mapper.readTree(raw) }.getOrNull() ?: return null
-        if (data.value("kind") != "local_manifest") return null
 
-        val key = data.value("key")
-        val cached = manifestCache[key] ?: return null
-        if (System.currentTimeMillis() - cached.createdAt > manifestTtlMs) {
-            manifestCache.remove(key)
-            return null
-        }
+        return when (data.value("kind")) {
+            "local_manifest" -> {
+                val key = data.value("key")
+                val cached = manifestCache[key] ?: return null
+                if (System.currentTimeMillis() - cached.createdAt > manifestTtlMs) {
+                    manifestCache.remove(key)
+                    return null
+                }
 
-        return Interceptor { chain ->
-            val original = chain.request()
+                Interceptor { chain ->
+                    val original = chain.request()
 
-            if (original.url.host.equals("nguonc.local", ignoreCase = true)) {
-                return@Interceptor okhttp3.Response.Builder()
-                    .request(original)
-                    .protocol(okhttp3.Protocol.HTTP_1_1)
-                    .code(200)
-                    .message("OK")
-                    .header("Content-Type", "application/vnd.apple.mpegurl")
-                    .body(
-                        cached.playlist.toByteArray(Charsets.UTF_8).toResponseBody(
-                            "application/vnd.apple.mpegurl".toMediaTypeOrNull()
-                        )
-                    )
-                    .build()
+                    if (original.url.host.equals("nguonc.local", ignoreCase = true)) {
+                        return@Interceptor okhttp3.Response.Builder()
+                            .request(original)
+                            .protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200)
+                            .message("OK")
+                            .header("Content-Type", "application/vnd.apple.mpegurl")
+                            .body(
+                                cached.playlist.toByteArray(Charsets.UTF_8).toResponseBody(
+                                    "application/vnd.apple.mpegurl".toMediaTypeOrNull()
+                                )
+                            )
+                            .build()
+                    }
+
+                    val request = original.newBuilder()
+                        .header("User-Agent", browserUserAgent)
+                        .apply {
+                            if (original.header("Referer").isNullOrBlank()) {
+                                header("Referer", cached.referer)
+                            }
+                        }
+                        .build()
+
+                    chain.proceed(request)
+                }
             }
 
-            val request = original.newBuilder()
-                .header("User-Agent", browserUserAgent)
-                .apply {
-                    if (original.header("Referer").isNullOrBlank()) {
-                        header("Referer", cached.referer)
-                    }
-                }
-                .build()
+            "streamc_remote" -> {
+                val videoHash = data.value("videoHash")
+                val playlistUrl = data.value("playlistUrl")
+                if (videoHash.isBlank() || playlistUrl.isBlank()) return null
 
-            chain.proceed(request)
+                Interceptor { chain ->
+                    val original = chain.request()
+                    val request = original.newBuilder()
+                        .header("User-Agent", browserUserAgent)
+                        .header("Referer", extractorLink.referer)
+                        .build()
+
+                    val response = chain.proceed(request)
+                    val isManifestRequest =
+                        request.url.toString().substringBefore('#') ==
+                            playlistUrl.substringBefore('#')
+
+                    if (!isManifestRequest) {
+                        return@Interceptor response
+                    }
+
+                    val body = response.body ?: return@Interceptor response
+                    val bytes = body.bytes()
+                    var text = runCatching {
+                        String(bytes, Charsets.UTF_8)
+                    }.getOrNull() ?: return@Interceptor response.newBuilder()
+                        .body(bytes.toResponseBody(body.contentType()))
+                        .build()
+
+                    if (text.contains("#ENC-AESGCM")) {
+                        text = runCatching {
+                            decryptPlaylist(text, videoHash)
+                        }.getOrElse {
+                            Log.e(
+                                "NguonC",
+                                "player playlist decrypt failed: ${it.message}",
+                                it,
+                            )
+                            return@Interceptor response.newBuilder()
+                                .body(bytes.toResponseBody(body.contentType()))
+                                .build()
+                        }
+                    }
+
+                    if (!text.contains("#EXTM3U")) {
+                        return@Interceptor response.newBuilder()
+                            .body(bytes.toResponseBody(body.contentType()))
+                            .build()
+                    }
+
+                    val absolute = absolutizePlaylist(
+                        text,
+                        response.request.url.toString(),
+                    )
+                    Log.i("NguonC", "player interceptor delivered decrypted HLS")
+
+                    response.newBuilder()
+                        .removeHeader("Content-Length")
+                        .removeHeader("Content-Encoding")
+                        .header("Content-Type", "application/vnd.apple.mpegurl")
+                        .body(
+                            absolute.toByteArray(Charsets.UTF_8).toResponseBody(
+                                "application/vnd.apple.mpegurl".toMediaTypeOrNull()
+                            )
+                        )
+                        .build()
+                }
+            }
+
+            else -> null
         }
     }
 
@@ -1062,4 +1137,5 @@ private data class ResolvedStream(
     val type: ExtractorLinkType,
     val headers: Map<String, String>,
     val manifestKey: String?,
+    val videoHash: String? = null,
 )
