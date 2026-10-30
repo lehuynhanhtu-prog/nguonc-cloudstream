@@ -264,7 +264,7 @@ def main():
         launch = (
             find_node(root, resource_suffix=":id/result_play_movie_button")
             or find_node(root, resource_suffix=":id/result_play_series_button")
-            or find_node(root, resource_suffix=":id/episode_holder")
+            or find_node(root, resource_suffix=":id/episode_text")
         )
         if launch is not None:
             break
@@ -282,10 +282,20 @@ def main():
         root, xml = dump_ui()
         print("RESULT_PAGE_TIMEOUT_UI", xml[-20000:], flush=True)
         print("FOCUSED_ACTIVITY", adb("shell", "dumpsys", "activity", "activities", check=False, timeout=20)[-12000:], flush=True)
-        raise RuntimeError("real NguonC title did not expose a movie play button or episode row")
+        raise RuntimeError("real NguonC title did not expose a movie/series play button or episode text")
 
     print("ANDROID_PROVIDER_METADATA_AND_EPISODES_OK", flush=True)
+    print("ANDROID_PLAY_TARGET", launch.attrib.get("resource-id", ""), launch.attrib.get("text", ""), flush=True)
+    adb("logcat", "-c", check=False)
     tap_node(launch)
+
+    # Require proof that the provider's loadLinks() actually ran. This avoids
+    # false E2E failures caused by tapping a non-playable card that reuses episode_holder.
+    provider_logs = wait_log(r"NguonC.*(?:emitSource|loadLinks|embed HTTP|resolved stream|callback emitted|generic extractor)", timeout=60)
+    print("ANDROID_LOADLINKS_INVOKED", flush=True)
+    for line in provider_logs.splitlines():
+        if "NguonC" in line:
+            print(line, flush=True)
 
     # Confirm that the real CloudStream Media3 player rendered video, not merely
     # that loadLinks returned an URL.
