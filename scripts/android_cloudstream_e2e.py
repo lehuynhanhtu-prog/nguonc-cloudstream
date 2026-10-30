@@ -224,20 +224,39 @@ def main():
     wait_log(r"Loaded plugin\s+NguonC(?:\.cs3)?\s+successfully", timeout=45)
     print("ANDROID_PLUGIN_RELOADED_WITH_PROXY", flush=True)
 
-    # Open the result using CloudStream's own csshare deep link. This encodes both
-    # apiName and URL, so MainActivity calls loadResult(url, "NguonC", ...) directly
-    # instead of relying on URL/provider matching during asynchronous startup.
-    api_b64 = base64.b64encode(b"NguonC").decode("ascii")
-    url_b64 = base64.b64encode(MOVIE_URL.encode("utf-8")).decode("ascii")
-    share_uri = f"csshare:{api_b64}?{url_b64}"
-    print("ANDROID_CSSHARE_URI", share_uri, flush=True)
-    adb(
-        "shell", "am", "start", "-W",
-        "-n", ACCOUNT_ACTIVITY,
-        "-a", "android.intent.action.VIEW",
-        "-d", share_uri,
-        timeout=45,
-    )
+    # Drive the same UI path as a real user: choose NguonC as the Home source,
+    # wait for its live catalog, and open the first real card. This avoids all
+    # deep-link routing behavior and proves the provider is usable from CloudStream UI.
+    source_button = wait_node(timeout=30, resource_suffix=":id/home_api_fab")
+    tap_node(source_button)
+    provider_row = wait_node(timeout=30, contains_text="NguonC")
+    tap_node(provider_row)
+    print("ANDROID_HOME_PROVIDER_SELECTED", flush=True)
+
+    # Wait until the source button reflects the provider and a real movie card appears.
+    end_catalog = time.time() + 90
+    first_card = None
+    last_xml = ""
+    while time.time() < end_catalog:
+        root, xml = dump_ui()
+        last_xml = xml
+        source = find_node(root, resource_suffix=":id/home_api_fab")
+        card = find_node(root, resource_suffix=":id/background_card")
+        loading_error = find_node(root, resource_suffix=":id/home_loading_error")
+        if loading_error is not None and loading_error.attrib.get("visible-to-user", "true") != "false":
+            print("ANDROID_HOME_PROVIDER_ERROR", xml[-20000:], flush=True)
+            raise RuntimeError("NguonC home source entered loading error state")
+        if source is not None and "NguonC" in source.attrib.get("text", "") and card is not None:
+            first_card = card
+            break
+        time.sleep(1)
+
+    if first_card is None:
+        print("ANDROID_HOME_CATALOG_TIMEOUT", last_xml[-20000:], flush=True)
+        raise RuntimeError("NguonC did not populate CloudStream Home catalog")
+
+    print("ANDROID_HOME_CATALOG_OK", flush=True)
+    tap_node(first_card)
 
     # The real provider must successfully load metadata/episodes to expose a play button.
     play = None
