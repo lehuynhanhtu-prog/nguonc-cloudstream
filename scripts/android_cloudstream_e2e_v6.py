@@ -286,6 +286,16 @@ def main():
 
     print("ANDROID_PROVIDER_METADATA_AND_EPISODES_OK", flush=True)
     print("ANDROID_PLAY_TARGET", launch.attrib.get("resource-id", ""), launch.attrib.get("text", ""), flush=True)
+
+    # NguonC API/catalog is geo-sensitive on GitHub runners, hence the verified
+    # VN proxy above. StreamC's signed playlist path, however, requires clean
+    # HTTP/2/TLS and public proxies frequently break it. Remove the proxy only
+    # after metadata/episode URLs are loaded so playback matches a real Android
+    # device's direct network path.
+    adb("shell", "settings", "put", "global", "http_proxy", ":0", check=False)
+    print("ANDROID_PROXY_DISABLED_FOR_STREAMC", flush=True)
+    time.sleep(2)
+
     adb("logcat", "-c", check=False)
     tap_node(launch)
 
