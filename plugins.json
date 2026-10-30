@@ -1,0 +1,24 @@
+[
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=phim.nguonc.com&sz=%size%",
+        "fileHash": "sha256-0d3d5df7007abbd1cfdaa33f44f95376bc906c159fa6648c93e230e4af494440",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/lehuynhanhtu-prog/nguonc-cloudstream",
+        "fileSize": 52302,
+        "status": 1,
+        "language": "vi",
+        "authors": [
+            "lehuynhanhtu-prog"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "version": 7,
+        "internalName": "NguonC",
+        "description": "NguonC provider for CloudStream",
+        "url": "https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/NguonC.cs3",
+        "name": "NguonC"
+    }
+]
