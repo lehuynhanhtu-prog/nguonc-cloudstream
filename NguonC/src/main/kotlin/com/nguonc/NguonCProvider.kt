@@ -23,6 +23,7 @@ class NguonCProvider : MainAPI() {
     override var lang = "vi"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
+    override val loadLinksTimeoutMs: Long? = 60_000L
 
     private val mapper = jacksonObjectMapper()
     private val apiBases = listOf(
@@ -254,10 +255,47 @@ class NguonCProvider : MainAPI() {
         for (source in sources) {
             val item = list.addObject()
             item.put("name", source.server)
+            item.put("key", source.key)
+            item.put("label", source.label)
             item.put("embed", source.embed)
             item.put("direct", source.direct)
         }
         return mapper.writeValueAsString(root)
+    }
+
+    private suspend fun refreshEpisodeSources(
+        referer: String,
+        wantedKey: String?,
+        wantedLabel: String?,
+    ): List<EpisodeSource> {
+        val endpoint = "${referer.trimEnd('/')}/episodes"
+        val json = runCatching {
+            val text = app.get(
+                endpoint,
+                headers = mapOf(
+                    "User-Agent" to browserUserAgent,
+                    "Accept" to "application/json,text/plain,*/*",
+                    "Referer" to referer,
+                    "Origin" to originOf(referer),
+                ),
+                referer = referer,
+            ).text
+            mapper.readTree(text)
+        }.getOrNull() ?: return emptyList()
+
+        val all = parseServers(json.path("servers"))
+        if (all.isEmpty()) return emptyList()
+
+        val exactKey = wantedKey?.takeIf(String::isNotBlank)
+        val exactLabel = wantedLabel?.takeIf(String::isNotBlank)
+
+        return when {
+            exactKey != null -> all.filter { it.key == exactKey }.ifEmpty {
+                all.filter { it.label.equals(exactLabel, ignoreCase = true) }
+            }
+            exactLabel != null -> all.filter { it.label.equals(exactLabel, ignoreCase = true) }
+            else -> all
+        }
     }
 
     override suspend fun loadLinks(
@@ -268,75 +306,102 @@ class NguonCProvider : MainAPI() {
     ): Boolean {
         val payload = runCatching { mapper.readTree(data) }.getOrNull() ?: return false
         val referer = payload.value("referer").ifBlank { "$mainUrl/" }
-        val sources = payload.path("sources")
-        if (!sources.isArray) return false
+        val original = payload.path("sources")
+        if (!original.isArray) return false
 
-        var found = false
+        val sources = original.map { source ->
+            EpisodeSource(
+                key = source.value("key"),
+                label = source.value("label"),
+                server = source.value("name").ifBlank { name },
+                embed = source.value("embed"),
+                direct = source.value("direct"),
+            )
+        }
 
-        for (source in sources) {
-            val sourceName = source.value("name").ifBlank { name }
-            val direct = source.value("direct")
-            val embed = source.value("embed")
-
-            if (direct.isNotBlank()) {
+        suspend fun emitSource(source: EpisodeSource): Boolean {
+            if (source.direct.isNotBlank()) {
                 callback(
-                    newExtractorLink(name, "$name - $sourceName", direct, type = ExtractorLinkType.M3U8) {
+                    newExtractorLink(
+                        name,
+                        "$name - ${source.server}",
+                        source.direct,
+                        type = ExtractorLinkType.M3U8,
+                    ) {
                         this.referer = referer
                         quality = Qualities.Unknown.value
                         headers = playerHeaders(referer)
                     }
                 )
-                found = true
-                continue
+                return true
             }
 
-            if (embed.isBlank()) continue
+            if (source.embed.isBlank()) return false
 
-            var sourceFound = false
+            resolveStreamC(source.embed, referer)?.let { stream ->
+                callback(
+                    newExtractorLink(
+                        name,
+                        "$name - ${source.server}",
+                        stream.url,
+                        type = stream.type,
+                    ) {
+                        this.referer = stream.referer
+                        quality = Qualities.Unknown.value
+                        headers = stream.headers
+                        if (!stream.videoHash.isNullOrBlank()) {
+                            extractorData = mapper.writeValueAsString(
+                                mapOf(
+                                    "kind" to "streamc",
+                                    "videoHash" to stream.videoHash,
+                                    "playlistUrl" to stream.url,
+                                )
+                            )
+                        }
+                    }
+                )
+                return true
+            }
+
+            var extracted = false
             runCatching {
-                loadExtractor(embed, referer, subtitleCallback) { link ->
-                    sourceFound = true
-                    found = true
+                loadExtractor(source.embed, referer, subtitleCallback) { link ->
+                    extracted = true
                     callback(link)
                 }
             }
-
-            if (!sourceFound) {
-                resolveStreamC(embed, referer)?.let { stream ->
-                    callback(
-                        newExtractorLink(
-                            name,
-                            "$name - $sourceName",
-                            stream.url,
-                            type = stream.type,
-                        ) {
-                            this.referer = stream.referer
-                            quality = Qualities.Unknown.value
-                            headers = stream.headers
-                            if (!stream.videoHash.isNullOrBlank()) {
-                                extractorData = mapper.writeValueAsString(
-                                    mapOf(
-                                        "kind" to "streamc",
-                                        "videoHash" to stream.videoHash,
-                                        "playlistUrl" to stream.url,
-                                    )
-                                )
-                            }
-                        }
-                    )
-                    found = true
-                }
-            }
+            return extracted
         }
 
-        return found
+        for (source in sources) {
+            if (emitSource(source)) return true
+        }
+
+        val wantedKey = sources.firstOrNull()?.key
+        val wantedLabel = sources.firstOrNull()?.label
+        val refreshed = refreshEpisodeSources(referer, wantedKey, wantedLabel)
+
+        for (source in refreshed) {
+            if (emitSource(source)) return true
+        }
+
+        return false
     }
 
     private suspend fun resolveStreamC(embedUrl: String, movieUrl: String): ResolvedStream? {
         return runCatching {
             val embedHtml = app.get(
                 embedUrl,
-                headers = playerHeaders(movieUrl),
+                headers = mapOf(
+                    "User-Agent" to browserUserAgent,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language" to "vi-VN,vi;q=0.9,en;q=0.7",
+                    "Referer" to movieUrl,
+                    "Origin" to originOf(movieUrl),
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                ),
                 referer = movieUrl,
             ).text
 
@@ -383,7 +448,12 @@ class NguonCProvider : MainAPI() {
                     headers = mapOf(
                         "User-Agent" to browserUserAgent,
                         "Accept" to "application/json,text/plain,*/*",
+                        "Content-Type" to "application/json",
                         "Origin" to embedOrigin,
+                        "Referer" to embedUrl,
+                        "Sec-Fetch-Dest" to "empty",
+                        "Sec-Fetch-Mode" to "cors",
+                        "Sec-Fetch-Site" to "same-origin",
                     ),
                     referer = embedUrl,
                 ).text
