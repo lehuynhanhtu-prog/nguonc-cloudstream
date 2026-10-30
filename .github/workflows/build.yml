@@ -26,13 +26,6 @@ jobs:
       - name: Install HTTP to SOCKS proxy bridge
         run: python -m pip install --disable-pip-version-check pproxy
 
-      - name: Find a live Viet Nam egress
-        shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x scripts/find_working_vn_proxy.sh
-          scripts/find_working_vn_proxy.sh
-
       - name: Download official CloudStream 4.8.0 APK
         shell: bash
         run: |
