@@ -95,6 +95,29 @@ def ui_has(resource_suffix):
     root, _ = dump_ui()
     return find_node(root, resource_suffix=resource_suffix) is not None
 
+def clear_runtime_permissions(timeout=20):
+    # Prefer granting storage permission through adb, then dismiss any remaining
+    # Android permission dialogs that CloudStream shows on first launch.
+    for perm in (
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+    ):
+        adb("shell", "pm", "grant", PKG, perm, check=False, timeout=20)
+
+    end = time.time() + timeout
+    while time.time() < end:
+        root, _ = dump_ui()
+        allow = (
+            find_node(root, resource_suffix=":id/permission_allow_button")
+            or find_node(root, text="Allow")
+            or find_node(root, contains_text="While using the app")
+        )
+        if allow is None:
+            return
+        tap_node(allow)
+        print("ANDROID_PERMISSION_ALLOWED", flush=True)
+        time.sleep(1)
+
 def main():
     apk = os.environ.get("CLOUDSTREAM_APK", "/tmp/cloudstream.apk")
     if not os.path.exists(apk):
@@ -107,6 +130,7 @@ def main():
     # First launch. A fresh install has one default account, so AccountSelectActivity
     # auto-enters MainActivity and shows the one-time setup.
     adb("shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1", timeout=30)
+    clear_runtime_permissions()
     try:
         skip = wait_node(timeout=35, resource_suffix=":id/skip_btt")
         tap_node(skip)
@@ -114,6 +138,8 @@ def main():
     except Exception:
         # If setup was already completed in a reused emulator image, continue.
         print("ANDROID_SETUP_SKIP_NOT_NEEDED", flush=True)
+
+    clear_runtime_permissions(timeout=8)
 
     # Add the exact released repository through CloudStream's public deep-link path.
     adb(
