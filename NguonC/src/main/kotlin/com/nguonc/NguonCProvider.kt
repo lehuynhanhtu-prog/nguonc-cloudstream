@@ -1,6 +1,7 @@
 package com.nguonc
 
 import android.util.Base64
+import android.webkit.WebSettings
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
@@ -9,9 +10,15 @@ import org.jsoup.Jsoup
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.ResponseBody.Companion.toResponseBody
+import java.net.HttpURLConnection
 import java.net.URI
+import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
@@ -30,9 +37,60 @@ class NguonCProvider : MainAPI() {
         "https://nguonc.com/api",
     )
 
-    private val browserUserAgent =
-        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    private val browserUserAgent: String by lazy {
+        runCatching {
+            val context = com.lagradost.cloudstream3.CloudStreamApp.context
+            WebSettings.getDefaultUserAgent(context)
+                ?.replace("; wv", "")
+                ?.replace(" wv)", ")")
+                ?.replace(Regex(""" Build/[^);]+"""), "")
+                ?.replace(Regex("""Version/\d+\.\d+ """), "")
+                ?.replace(Regex("""\s+"""), " ")
+                ?.trim()
+        }.getOrNull()?.takeIf { it.contains("Chrome/") && it.contains("Android") }
+            ?: "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    }
+
+    private val chromeMajor: String by lazy {
+        Regex("""Chrome/(\d+)""").find(browserUserAgent)?.groupValues?.getOrNull(1) ?: "131"
+    }
+
+    private val cronetEngine: Any? by lazy {
+        runCatching {
+            val context = com.lagradost.cloudstream3.CloudStreamApp.context
+            val builderClass = Class.forName("org.chromium.net.CronetEngine\$Builder")
+            val builder = builderClass
+                .getConstructor(android.content.Context::class.java)
+                .newInstance(context)
+            for (method in listOf("enableHttp2", "enableQuic", "enableBrotli")) {
+                runCatching {
+                    builderClass.getMethod(method, Boolean::class.javaPrimitiveType)
+                        .invoke(builder, true)
+                }
+            }
+            runCatching {
+                builderClass.getMethod("setUserAgent", String::class.java)
+                    .invoke(builder, browserUserAgent)
+            }
+            builderClass.getMethod("build").invoke(builder)
+        }.getOrNull()
+    }
+
+    private val cronetOpen by lazy {
+        runCatching {
+            Class.forName("org.chromium.net.CronetEngine")
+                .getMethod("openConnection", URL::class.java)
+        }.getOrNull()
+    }
+
+    private data class CachedManifest(
+        val playlist: String,
+        val referer: String,
+        val createdAt: Long,
+    )
+
+    private val manifestCache = ConcurrentHashMap<String, CachedManifest>()
+    private val manifestTtlMs = 30L * 60L * 1000L
 
     override val mainPage = mainPageOf(
         "films/phim-moi-cap-nhat" to "Mới cập nhật",
