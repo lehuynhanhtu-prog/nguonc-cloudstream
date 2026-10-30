@@ -2,13 +2,16 @@ package com.nguonc
 
 import android.util.Base64
 import android.webkit.WebSettings
+import android.util.Log
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.net.HttpURLConnection
 import java.net.URI
@@ -220,9 +223,8 @@ class NguonCProvider : MainAPI() {
 
         val fallback = app.post(
             url,
-            json = json,
-            headers = headers,
-            referer = referer,
+            requestBody = body.toRequestBody("application/json".toMediaType()),
+            headers = headers + ("Referer" to referer),
         )
         return BrowserResponse(fallback.code, fallback.text, url)
     }
@@ -452,10 +454,17 @@ class NguonCProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val payload = runCatching { mapper.readTree(data) }.getOrNull() ?: return false
+        val payload = runCatching { mapper.readTree(data) }.getOrNull()
+            ?: run {
+                Log.e("NguonC", "loadLinks: invalid payload")
+                return false
+            }
         val referer = payload.value("referer").ifBlank { "$mainUrl/" }
         val sources = payload.path("sources")
-        if (!sources.isArray) return false
+        if (!sources.isArray) {
+            Log.e("NguonC", "loadLinks: no source array")
+            return false
+        }
 
         var found = false
 
@@ -485,6 +494,8 @@ class NguonCProvider : MainAPI() {
                     found = true
                     callback(link)
                 }
+            }.onFailure {
+                Log.w("NguonC", "Generic extractor failed: ${it.javaClass.simpleName}: ${it.message}")
             }
 
             if (!sourceFound) {
@@ -514,6 +525,9 @@ class NguonCProvider : MainAPI() {
             }
         }
 
+        if (!found) {
+            Log.e("NguonC", "loadLinks: no playable links from ${sources.size()} source(s)")
+        }
         return found
     }
 
@@ -683,6 +697,8 @@ class NguonCProvider : MainAPI() {
                 headers = playerHeaders(embedUrl),
                 manifestKey = key,
             )
+        }.onFailure {
+            Log.e("NguonC", "StreamC resolver: ${it.javaClass.simpleName}: ${it.message}", it)
         }.getOrNull()
     }
 
