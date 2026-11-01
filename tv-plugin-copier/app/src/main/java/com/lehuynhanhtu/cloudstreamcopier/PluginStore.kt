@@ -6,7 +6,14 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 
-data class TvPlugin(val name: String, val remotePath: String, val size: Long)
+data class TvPlugin(
+    val name: String,
+    val remotePath: String? = null,
+    val size: Long = 0,
+    val url: String? = null,
+    val version: Int? = null,
+    val online: Boolean = false,
+)
 data class BackupPlugin(val name: String, val file: File, val size: Long, val sha256: String, val source: String)
 
 class PluginStore(private val context: Context) {
