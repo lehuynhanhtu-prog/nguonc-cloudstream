@@ -33,6 +33,7 @@ class MainActivity : ComponentActivity() {
         var url by remember { mutableStateOf("") }
         var status by remember { mutableStateOf("Chưa kết nối") }
         var busy by remember { mutableStateOf(false) }
+        var scanResults by remember { mutableStateOf<List<String>>(emptyList()) }
         var tvPlugins by remember { mutableStateOf<List<TvPlugin>>(emptyList()) }
         var repoUrls by remember { mutableStateOf<List<String>>(emptyList()) }
         var backups by remember { mutableStateOf(store.listBackups()) }
@@ -57,6 +58,20 @@ class MainActivity : ComponentActivity() {
                 AssistChip(onClick = {}, label = { Text(if (busy) "Đang xử lý…" else status) })
 
                 BoxSection("1. Kết nối TV") {
+                    Button(enabled = !busy, onClick = { job("Đang quét TV cùng Wi-Fi…") {
+                        scanResults = NetworkScanner.scanAdb5555(this@MainActivity)
+                        status = if (scanResults.isEmpty()) {
+                            "Không thấy thiết bị mở ADB 5555. TV Android 11+ hãy dùng Ghép đôi Wireless debugging."
+                        } else {
+                            "Tìm thấy " + scanResults.size + " thiết bị ADB"
+                        }
+                    } }) { Text("Quét TV cùng mạng") }
+                    scanResults.forEach { ip ->
+                        ActionRow(ip, "ADB 5555", "Chọn") {
+                            addr = ip + ":5555"
+                            status = "Đã chọn " + addr
+                        }
+                    }
                     OutlinedTextField(addr, { addr = it }, label = { Text("IP:cổng ADB") }, modifier = Modifier.fillMaxWidth())
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(enabled = !busy, onClick = { job("Đang kết nối…") {
@@ -75,19 +90,38 @@ class MainActivity : ComponentActivity() {
                     }}) { Text("Ghép đôi Wireless debugging") }
                 }
 
-                BoxSection("2. Plugin local") {
-                    Text("Đọc /sdcard/Cloudstream3/plugins (không cần root).")
-                    Button(enabled=!busy,onClick={ job("Đang quét…") {
-                        val out=withContext(Dispatchers.IO){adb.shell("find /sdcard/Cloudstream3/plugins -maxdepth 1 -type f -name '*.cs3' -print 2>/dev/null")}
-                        val paths=out.lineSequence().map(String::trim).filter{it.endsWith(".cs3",true)}.distinct().toList()
-                        tvPlugins=withContext(Dispatchers.IO){ paths.map { p -> TvPlugin(p.substringAfterLast('/'),p,adb.shell("wc -c < ${AdbClient.quote(p)}").trim().toLongOrNull()?:0) } }
-                        status="Tìm thấy ${tvPlugins.size} plugin local"
-                    }}) { Text("Quét plugin local") }
-                    tvPlugins.forEach { p -> ActionRow(p.name,"${p.size} byte","Sao lưu") { job("Sao lưu ${p.name}…") {
-                        val data=withContext(Dispatchers.IO){adb.readRemoteFile(p.remotePath)}; store.save(p.name,data,"TV"); refresh(); status="Đã sao lưu ${p.name}"
-                    } } }
+                BoxSection("2. Quét plugin CloudStream") {
+                    Text("Quét cả plugin local và plugin cài từ repository. App sẽ tự mở lại CloudStream để đọc tên, URL và version plugin từ log.")
+                    Button(enabled=!busy,onClick={ job("Đang quét tất cả plugin…") {
+                        tvPlugins = withContext(Dispatchers.IO) { CloudStreamScanner.scan(adb) }
+                        val online = tvPlugins.count { it.online }
+                        val local = tvPlugins.size - online
+                        status = "Tìm thấy " + tvPlugins.size + " plugin • repository " + online + " • local " + local
+                    }}) { Text("Quét tất cả plugin") }
+                    if (tvPlugins.isEmpty()) {
+                        Text("Nếu vẫn 0 plugin: hãy chắc chắn CloudStream đã cài extension, rồi bấm quét lại.", style=MaterialTheme.typography.bodySmall)
+                    }
+                    tvPlugins.forEach { p ->
+                        val type = if (p.online) "Repository" else "Local"
+                        val detail = buildString {
+                            append(type)
+                            p.version?.let { append(" • v" + it) }
+                            if (p.size > 0) append(" • " + p.size + " byte")
+                            p.url?.let { append("\n" + it.take(90)) }
+                        }
+                        ActionRow(p.name, detail, "Sao lưu") { job("Sao lưu " + p.name + "…") {
+                            if (p.online && !p.url.isNullOrBlank()) {
+                                withContext(Dispatchers.IO) { store.download(p.url!!) }
+                            } else {
+                                val path = p.remotePath ?: error("Không có đường dẫn plugin")
+                                val data = withContext(Dispatchers.IO) { adb.readRemoteFile(path) }
+                                store.save(p.name, data, "TV")
+                            }
+                            refresh()
+                            status = "Đã sao lưu " + p.name
+                        } }
+                    }
                 }
-
                 BoxSection("3. Plugin repository") {
                     Text("Plugin repository nằm trong vùng private của CloudStream. App lấy lại URL .cs3 từ log khi CloudStream cập nhật/cài lại extension.")
                     Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -97,7 +131,7 @@ class MainActivity : ComponentActivity() {
                         }}) { Text("Bắt đầu") }
                         OutlinedButton(enabled=!busy,onClick={ job("Đang đọc log…") {
                             val log=withContext(Dispatchers.IO){adb.shell("logcat -d -v raw | tail -n 4000",60)}
-                            repoUrls=Regex("Downloading plugin:\\s+(https?://\\S+)").findAll(log).map{it.groupValues[1]}.distinct().toList()
+                            repoUrls=CloudStreamScanner.repositoryUrls(log)
                             status="Tìm thấy ${repoUrls.size} URL"
                         }}) { Text("Đọc log") }
                     }
@@ -123,7 +157,7 @@ class MainActivity : ComponentActivity() {
                     }}) { Text("Cài tất cả lên TV đang kết nối") }
                 }
 
-                Text("Cách dùng: kết nối TV nguồn → sao lưu → ngắt → kết nối TV đích → cài bản sao. Với plugin repository, chạy Bắt đầu rồi cập nhật/cài lại extension trong CloudStream để URL xuất hiện trong log.", style=MaterialTheme.typography.bodySmall)
+                Text("Cách dùng: Quét TV cùng mạng hoặc nhập IP → Kết nối → Quét tất cả plugin → Sao lưu → ngắt TV nguồn → kết nối TV đích → cài bản sao. TV Android 11+ dùng cổng ADB ngẫu nhiên nên nếu quét 5555 không thấy, dùng Ghép đôi Wireless debugging.", style=MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(24.dp))
             }
         }
