@@ -21,6 +21,7 @@ class MainActivity : ComponentActivity() {
         setContent { MaterialTheme { AppUi() } }
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun AppUi() {
         val adb = remember { AdbClient.get(this) }
