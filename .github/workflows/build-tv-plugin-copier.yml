@@ -1,0 +1,57 @@
+name: Build CloudStream TV Plugin Copier
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tv-plugin-copier/**'
+      - '.github/workflows/build-tv-plugin-copier.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tv-plugin-copier-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android SDK 35
+        shell: bash
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Build signed release APK
+        working-directory: tv-plugin-copier
+        run: gradle :app:assembleRelease --stacktrace
+      - name: Stage APK
+        shell: bash
+        run: |
+          rm -rf tv-plugin-copier-publish
+          mkdir -p tv-plugin-copier-publish
+          cp tv-plugin-copier/app/build/outputs/apk/release/app-release.apk tv-plugin-copier-publish/CloudStream-TV-Plugin-Copier.apk
+          (cd tv-plugin-copier-publish && sha256sum CloudStream-TV-Plugin-Copier.apk > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloudStream-TV-Plugin-Copier
+          path: tv-plugin-copier-publish/
+      - name: Publish APK branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: tv-copier-builds
+          publish_dir: ./tv-plugin-copier-publish
+          force_orphan: true
