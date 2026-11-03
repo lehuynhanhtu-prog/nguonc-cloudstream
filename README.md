@@ -22,6 +22,19 @@ Pull requests are compiled by GitHub Actions before changes are merged to `main`
 - Publishing: successful builds push `.cs3`, `plugins.json`, and `repo.json` to branch `builds`.
 - Update `version` in `NguonC/build.gradle.kts` for a new extension release.
 
+
+## MyStream (independent extension)
+
+MyStream is a separate CloudStream extension in the same repository. It does not modify the NguonC provider or its playback code.
+
+- Extension source: `MyStream/src/main/kotlin/com/mystream/`
+- Editable catalog: `catalog/mystream.json`
+- Published catalog: `https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/mystream.json`
+- Supported direct media: MP4 and HLS (`.m3u8`)
+- Supports movies, episodic series, poster/plot/year/tags, multiple sources, per-source headers/referer, and subtitles.
+
+A public sample item is included only to verify installation and playback. To add your own media, edit `catalog/mystream.json`; the extension fetches the catalog remotely so ordinary catalog changes do not require a MyStream version bump.
+
 ## Validation
 
 The provider uses NguonC API endpoints for lists, search, film details, and episode streams. API availability, Gradle compatibility, and Android playback have **not yet been independently verified**. Check the Actions tab for build errors before using the repository URL.
