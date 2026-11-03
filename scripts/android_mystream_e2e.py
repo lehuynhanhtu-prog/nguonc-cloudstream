@@ -72,6 +72,24 @@ def tap_node(node):
     adb("shell", "input", "tap", str(center[0]), str(center[1]))
     time.sleep(1)
 
+def raw_bounds(xml, resource_suffix):
+    # UiAutomator XML is occasionally parseable for most of the page but misses a
+    # newly-rendered button in ElementTree. The raw dump still contains the node.
+    # Match resource-id and bounds directly as a fallback.
+    rx = re.compile(
+        r'<node[^>]*resource-id="[^"]*' + re.escape(resource_suffix) +
+        r'"[^>]*bounds="(\\[\\d+,\\d+\\]\\[\\d+,\\d+\\])"'
+    )
+    m = rx.search(xml or "")
+    return m.group(1) if m else None
+
+def tap_bounds(bounds):
+    center = bounds_center(bounds)
+    if not center:
+        raise RuntimeError(f"invalid raw bounds: {bounds}")
+    adb("shell", "input", "tap", str(center[0]), str(center[1]))
+    time.sleep(1)
+
 def wait_log(pattern, timeout=60):
     rx = re.compile(pattern, re.I | re.S)
     end = time.time() + timeout
@@ -198,6 +216,8 @@ def main():
     tap_node(first_card)
 
     launch = None
+    launch_bounds = None
+    launch_label = ""
     end = time.time() + 90
     while time.time() < end:
         root, xml = dump_ui()
@@ -207,15 +227,32 @@ def main():
             or find_node(root, resource_suffix=":id/result_play_series")
             or find_node(root, resource_suffix=":id/result_play_series_button")
             or find_node(root, resource_suffix=":id/episode_text")
+            or find_node(root, text="Play Movie")
         )
         if launch is not None:
+            launch_label = launch.attrib.get("resource-id", "") or launch.attrib.get("text", "")
             break
+
+        for suffix in (
+            ":id/result_play_movie",
+            ":id/result_play_movie_button",
+            ":id/result_play_series",
+            ":id/result_play_series_button",
+            ":id/episode_text",
+        ):
+            launch_bounds = raw_bounds(xml, suffix)
+            if launch_bounds:
+                launch_label = suffix
+                break
+        if launch_bounds:
+            break
+
         if find_node(root, resource_suffix=":id/result_loading_error") is not None:
             print("MYSTREAM_RESULT_ERROR", xml[-16000:], flush=True)
             raise RuntimeError("MyStream result page entered error state")
         time.sleep(1)
 
-    if launch is None:
+    if launch is None and launch_bounds is None:
         root, xml = dump_ui()
         launch = (
             find_node(root, resource_suffix=":id/result_play_movie")
@@ -223,14 +260,33 @@ def main():
             or find_node(root, resource_suffix=":id/result_play_series")
             or find_node(root, resource_suffix=":id/result_play_series_button")
             or find_node(root, resource_suffix=":id/episode_text")
+            or find_node(root, text="Play Movie")
         )
-        if launch is None:
-            print("MYSTREAM_RESULT_TIMEOUT", xml[-16000:], flush=True)
-            raise RuntimeError("MyStream sample did not expose a play control")
+        if launch is not None:
+            launch_label = launch.attrib.get("resource-id", "") or launch.attrib.get("text", "")
+        else:
+            for suffix in (
+                ":id/result_play_movie",
+                ":id/result_play_movie_button",
+                ":id/result_play_series",
+                ":id/result_play_series_button",
+                ":id/episode_text",
+            ):
+                launch_bounds = raw_bounds(xml, suffix)
+                if launch_bounds:
+                    launch_label = suffix
+                    break
 
-    print("ANDROID_MYSTREAM_PLAY_TARGET", launch.attrib.get("resource-id", ""), launch.attrib.get("text", ""), flush=True)
+    if launch is None and launch_bounds is None:
+        print("MYSTREAM_RESULT_TIMEOUT", xml[-16000:], flush=True)
+        raise RuntimeError("MyStream sample did not expose a play control")
+
+    print("ANDROID_MYSTREAM_PLAY_TARGET", launch_label, launch_bounds or "", flush=True)
     adb("logcat", "-c", check=False)
-    tap_node(launch)
+    if launch is not None:
+        tap_node(launch)
+    else:
+        tap_bounds(launch_bounds)
 
     logs = wait_log(r"CS3IPlayer.*Rendered first frame|Rendered first frame", timeout=90)
     if re.search(r"loadExo error|PlaybackException|Failed link loading", logs, re.I) and not re.search(r"Rendered first frame", logs, re.I):
