@@ -7,14 +7,17 @@
       "type": "movie",
       "year": 2008,
       "poster": "https://storage.googleapis.com/gtv-videos-bucket/sample/images/BigBuckBunny.jpg",
-      "plot": "Video mẫu công khai dùng để kiểm tra playback trực tiếp trong MyStream.",
-      "tags": ["Mẫu", "Kiểm thử"],
+      "plot": "Video HLS mẫu công khai dùng để kiểm tra playback trực tiếp trong MyStream.",
+      "tags": [
+        "Mẫu",
+        "Kiểm thử"
+      ],
       "sources": [
         {
-          "name": "MP4 mẫu",
-          "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-          "type": "video",
-          "quality": "720p"
+          "name": "HLS mẫu Mux",
+          "url": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+          "type": "hls",
+          "quality": "1080p"
         }
       ],
       "subtitles": []
