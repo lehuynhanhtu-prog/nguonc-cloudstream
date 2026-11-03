@@ -202,7 +202,9 @@ def main():
     while time.time() < end:
         root, xml = dump_ui()
         launch = (
-            find_node(root, resource_suffix=":id/result_play_movie_button")
+            find_node(root, resource_suffix=":id/result_play_movie")
+            or find_node(root, resource_suffix=":id/result_play_movie_button")
+            or find_node(root, resource_suffix=":id/result_play_series")
             or find_node(root, resource_suffix=":id/result_play_series_button")
             or find_node(root, resource_suffix=":id/episode_text")
         )
