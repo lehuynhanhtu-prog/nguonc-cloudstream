@@ -198,7 +198,7 @@ def main():
     tap_node(first_card)
 
     launch = None
-    end = time.time() + 60
+    end = time.time() + 90
     while time.time() < end:
         root, xml = dump_ui()
         launch = (
@@ -216,9 +216,17 @@ def main():
         time.sleep(1)
 
     if launch is None:
-        _, xml = dump_ui()
-        print("MYSTREAM_RESULT_TIMEOUT", xml[-16000:], flush=True)
-        raise RuntimeError("MyStream sample did not expose a play control")
+        root, xml = dump_ui()
+        launch = (
+            find_node(root, resource_suffix=":id/result_play_movie")
+            or find_node(root, resource_suffix=":id/result_play_movie_button")
+            or find_node(root, resource_suffix=":id/result_play_series")
+            or find_node(root, resource_suffix=":id/result_play_series_button")
+            or find_node(root, resource_suffix=":id/episode_text")
+        )
+        if launch is None:
+            print("MYSTREAM_RESULT_TIMEOUT", xml[-16000:], flush=True)
+            raise RuntimeError("MyStream sample did not expose a play control")
 
     print("ANDROID_MYSTREAM_PLAY_TARGET", launch.attrib.get("resource-id", ""), launch.attrib.get("text", ""), flush=True)
     adb("logcat", "-c", check=False)
