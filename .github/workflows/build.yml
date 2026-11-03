@@ -51,6 +51,7 @@ jobs:
           find . -type f -path '*/build/*.jar' -exec cp {} publish/ \;
           cp build/plugins.json publish/plugins.json
           cp repo.json publish/repo.json
+          cp catalog/mystream.json publish/mystream.json
           test -n "$(find publish -name '*.cs3' -print -quit)"
           test -s publish/plugins.json
 
