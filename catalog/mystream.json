@@ -37,7 +37,8 @@
           "quality": "480p"
         }
       ],
-      "subtitles": []
+      "subtitles": [],
+      "section": "Phim mở"
     },
     {
       "id": "tears-of-steel",
@@ -68,7 +69,8 @@
           "quality": "1080p"
         }
       ],
-      "subtitles": []
+      "subtitles": [],
+      "section": "Phim mở"
     },
     {
       "id": "mystream-series-demo",
@@ -137,7 +139,8 @@
           ],
           "subtitles": []
         }
-      ]
+      ],
+      "section": "Phim bộ mẫu"
     },
     {
       "id": "mystream-anime-demo",
@@ -188,7 +191,73 @@
           ],
           "subtitles": []
         }
-      ]
+      ],
+      "section": "Anime mẫu"
+    },
+    {
+      "id": "sintel",
+      "title": "Sintel",
+      "originalTitle": "Sintel",
+      "type": "movie",
+      "year": 2010,
+      "updatedAt": "2026-11-04",
+      "featured": true,
+      "country": "Open Movie",
+      "status": "Hoàn thành",
+      "section": "Phim mở",
+      "genres": [
+        "Hoạt hình",
+        "Phiêu lưu",
+        "Kỳ ảo"
+      ],
+      "poster": "https://commons.wikimedia.org/wiki/Special:Redirect/file/Sintel%20poster.jpg",
+      "plot": "Sintel lên đường tìm kiếm một chú rồng nhỏ mà cô từng cứu, trong một hành trình phiêu lưu của Blender Foundation.",
+      "tags": [
+        "Blender",
+        "Open Movie",
+        "HLS"
+      ],
+      "sources": [
+        {
+          "name": "HLS Adaptive",
+          "url": "https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8",
+          "type": "hls",
+          "quality": "1080p"
+        }
+      ],
+      "subtitles": []
+    },
+    {
+      "id": "elephants-dream",
+      "title": "Elephants Dream",
+      "originalTitle": "Elephants Dream",
+      "type": "movie",
+      "year": 2006,
+      "updatedAt": "2026-11-04",
+      "featured": false,
+      "country": "Open Movie",
+      "status": "Hoàn thành",
+      "section": "Phim mở",
+      "genres": [
+        "Hoạt hình",
+        "Khoa học viễn tưởng"
+      ],
+      "poster": "https://commons.wikimedia.org/wiki/Special:Redirect/file/ElephantsDreamPoster.jpg",
+      "plot": "Hai nhân vật khám phá một cỗ máy khổng lồ và kỳ dị trong bộ phim mở đầu tiên của Blender Foundation.",
+      "tags": [
+        "Blender",
+        "Open Movie",
+        "HLS"
+      ],
+      "sources": [
+        {
+          "name": "HLS Adaptive",
+          "url": "https://bitdash-a.akamaihd.net/content/MI201109210084_1/m3u8s/f08e80da-bf1d-4e3d-8899-f0f6155f6efa.m3u8",
+          "type": "hls",
+          "quality": "1080p"
+        }
+      ],
+      "subtitles": []
     }
   ]
 }
