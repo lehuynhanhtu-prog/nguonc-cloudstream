@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 class MyStreamProvider : MainAPI() {
     override var mainUrl = "https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds"
@@ -17,9 +19,14 @@ class MyStreamProvider : MainAPI() {
     private val mapper = jacksonObjectMapper()
     private val primaryCatalogUrl = "$mainUrl/mystream.json"
     private val feedIndexUrl = "$mainUrl/mystream-feeds.json"
+    private val archiveSearchUrl = "https://archive.org/advancedsearch.php"
+    private val archiveMetadataUrl = "https://archive.org/metadata"
+    private val archiveDownloadUrl = "https://archive.org/download"
+    private val archivePageSize = 30
 
     override val mainPage = mainPageOf(
         "home" to "MyStream",
+        "archive" to "Phim công khai - Internet Archive",
     )
 
     private val fallbackCatalog = """
@@ -161,12 +168,92 @@ class MyStreamProvider : MainAPI() {
         }
     }
 
+
+    private data class ArchivePage(
+        val docs: List<JsonNode>,
+        val hasNext: Boolean,
+    )
+
+    private fun urlEncode(value: String): String =
+        URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+
+    private fun pathEncode(value: String): String =
+        value.split('/').joinToString("/") { part ->
+            urlEncode(part).replace("+", "%20")
+        }
+
+    private fun archiveItemUrl(identifier: String): String =
+        primaryCatalogUrl + "#ia=" + identifier
+
+    private fun archivePosterUrl(identifier: String): String =
+        "https://archive.org/services/img/" + pathEncode(identifier)
+
+    private fun archiveYear(node: JsonNode): Int? {
+        val yearNode = node.path("year")
+        if (yearNode.isNumber) return yearNode.asInt().takeIf { it > 0 }
+        val raw = if (yearNode.isArray) {
+            yearNode.firstOrNull()?.asText("").orEmpty()
+        } else {
+            yearNode.asText("")
+        }
+        return Regex("(18|19|20)\\d{2}").find(raw)?.value?.toIntOrNull()
+    }
+
+    private fun archiveDocToSearch(doc: JsonNode): SearchResponse? {
+        val identifier = doc.textValue("identifier").ifBlank { return null }
+        val title = doc.textValue("title").ifBlank { identifier }
+        return newMovieSearchResponse(title, archiveItemUrl(identifier), TvType.Movie) {
+            posterUrl = archivePosterUrl(identifier)
+            year = archiveYear(doc)
+        }
+    }
+
+    private suspend fun archivePage(page: Int, query: String? = null): ArchivePage {
+        val baseQuery = "mediatype:movies AND collection:feature_films"
+        val fullQuery = query
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { baseQuery + " AND title:(" + it + ")" }
+            ?: baseQuery
+
+        val safePage = page.coerceAtLeast(1)
+        val url = archiveSearchUrl +
+            "?q=" + urlEncode(fullQuery) +
+            "&fl%5B%5D=identifier" +
+            "&fl%5B%5D=title" +
+            "&fl%5B%5D=year" +
+            "&fl%5B%5D=date" +
+            "&fl%5B%5D=description" +
+            "&sort%5B%5D=downloads+desc" +
+            "&rows=" + archivePageSize +
+            "&page=" + safePage +
+            "&output=json"
+
+        val root = fetchJson(url) ?: return ArchivePage(emptyList(), false)
+        val response = root.path("response")
+        val docs = response.path("docs").takeIf { it.isArray }?.toList().orEmpty()
+        val total = response.path("numFound").asInt(docs.size)
+        return ArchivePage(
+            docs = docs,
+            hasNext = safePage * archivePageSize < total,
+        )
+    }
+
     private fun homeList(title: String, nodes: List<JsonNode>): HomePageList? {
         val results = nodes.mapNotNull(::toSearchResponse)
         return results.takeIf { it.isNotEmpty() }?.let { HomePageList(title, it) }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (request.data == "archive") {
+            val archive = archivePage(page)
+            return newHomePageResponse(
+                request,
+                archive.docs.mapNotNull(::archiveDocToSearch),
+                archive.hasNext,
+            )
+        }
+
         if (page > 1) return newHomePageResponse(emptyList<HomePageList>(), false)
 
         val all = items()
@@ -215,7 +302,7 @@ class MyStreamProvider : MainAPI() {
         val terms = query.trim().lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
         if (terms.isEmpty()) return emptyList()
 
-        return items().filter { item ->
+        val local = items().filter { item ->
             val haystack = buildString {
                 append(item.textValue("title"))
                 append(' ')
@@ -232,6 +319,12 @@ class MyStreamProvider : MainAPI() {
             }.lowercase()
             terms.all { it in haystack }
         }.mapNotNull(::toSearchResponse)
+
+        val remote = runCatching {
+            archivePage(1, query).docs.mapNotNull(::archiveDocToSearch)
+        }.getOrDefault(emptyList())
+
+        return local + remote
     }
 
     private fun episodePayload(item: JsonNode, episode: JsonNode): String {
@@ -253,6 +346,11 @@ class MyStreamProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        val archiveId = url.substringAfter("#ia=", "").substringBefore('&').trim()
+        if (archiveId.isNotBlank()) {
+            return loadArchiveItem(archiveId)
+        }
+
         val id = url.substringAfter("#item=", "").substringBefore('&').trim()
         if (id.isBlank()) return null
 
@@ -294,6 +392,118 @@ class MyStreamProvider : MainAPI() {
             posterUrl = poster
             backgroundPosterUrl = backdrop
             plot = plotText
+            year = yearValue
+            tags = tagsValue
+        }
+    }
+
+
+    private fun flexibleText(node: JsonNode, key: String): String {
+        val value = node.path(key)
+        return when {
+            value.isArray -> value.firstOrNull()?.asText("").orEmpty().trim()
+            value.isTextual || value.isNumber -> value.asText("").trim()
+            else -> ""
+        }
+    }
+
+    private fun flexibleList(node: JsonNode, key: String): List<String> {
+        val value = node.path(key)
+        return when {
+            value.isArray -> value.map { it.asText("").trim() }.filter { it.isNotBlank() }
+            value.isTextual -> value.asText("")
+                .split(';', ',', '|')
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+            else -> emptyList()
+        }
+    }
+
+    private fun archiveDirectUrl(identifier: String, fileName: String): String =
+        archiveDownloadUrl + "/" + pathEncode(identifier) + "/" + pathEncode(fileName)
+
+    private fun archiveQuality(fileName: String): String {
+        val match = Regex("(2160|1440|1080|720|480|360|240)p", RegexOption.IGNORE_CASE)
+            .find(fileName)
+            ?.groupValues
+            ?.getOrNull(1)
+        return match?.plus("p").orEmpty()
+    }
+
+    private suspend fun loadArchiveItem(identifier: String): LoadResponse? {
+        val root = fetchJson(archiveMetadataUrl + "/" + pathEncode(identifier)) ?: return null
+        val metadata = root.path("metadata")
+        val title = flexibleText(metadata, "title").ifBlank { identifier }
+        val plot = flexibleText(metadata, "description")
+            .replace(Regex("<[^>]+>"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .ifBlank { null }
+        val dateText = flexibleText(metadata, "date")
+        val yearValue = Regex("(18|19|20)\\d{2}")
+            .find(dateText)
+            ?.value
+            ?.toIntOrNull()
+        val tagsValue = (
+            flexibleList(metadata, "subject") +
+                flexibleList(metadata, "keywords")
+            ).distinct().take(20).ifEmpty { null }
+
+        val files = root.path("files")
+            .takeIf { it.isArray }
+            ?.filter { file ->
+                val name = file.textValue("name")
+                val size = file.path("size").asLong(0L)
+                name.endsWith(".mp4", true) &&
+                    size >= 1_000_000L &&
+                    size <= 3_000_000_000L
+            }
+            .orEmpty()
+            .sortedWith(
+                compareBy<JsonNode> {
+                    if (it.textValue("source").equals("derivative", true)) 0 else 1
+                }.thenBy { it.path("size").asLong(Long.MAX_VALUE) }
+            )
+
+        if (files.isEmpty()) return null
+
+        val payload = mapper.createObjectNode()
+        val sources = mapper.createArrayNode()
+        files.take(6).forEach { file ->
+            val fileName = file.textValue("name")
+            val source = mapper.createObjectNode()
+            val format = file.textValue("format").ifBlank { "MP4" }
+            source.put("name", "Internet Archive - " + format)
+            source.put("url", archiveDirectUrl(identifier, fileName))
+            source.put("type", "video")
+            source.put("quality", archiveQuality(fileName))
+            sources.add(source)
+        }
+
+        val subtitles = mapper.createArrayNode()
+        root.path("files").takeIf { it.isArray }?.forEach { file ->
+            val fileName = file.textValue("name")
+            if (!fileName.endsWith(".vtt", true) && !fileName.endsWith(".srt", true)) {
+                return@forEach
+            }
+            val subtitle = mapper.createObjectNode()
+            subtitle.put("name", fileName.substringBeforeLast('.'))
+            subtitle.put("lang", "Sub")
+            subtitle.put("url", archiveDirectUrl(identifier, fileName))
+            subtitles.add(subtitle)
+        }
+
+        payload.set<JsonNode>("sources", sources)
+        payload.set<JsonNode>("subtitles", subtitles)
+
+        return newMovieLoadResponse(
+            title,
+            archiveItemUrl(identifier),
+            TvType.Movie,
+            payload.toString(),
+        ) {
+            posterUrl = archivePosterUrl(identifier)
+            plot = plot
             year = yearValue
             tags = tagsValue
         }
