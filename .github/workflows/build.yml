@@ -38,6 +38,9 @@ jobs:
         with:
           gradle-version: '8.12'
 
+      - name: Validate MyStream catalog
+        run: python scripts/validate_mystream_catalog.py
+
       - name: Build extension and plugin manifest
         run: gradle make makePluginsJson --stacktrace
 
