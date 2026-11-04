@@ -23,15 +23,15 @@ Pull requests are compiled by GitHub Actions before changes are merged to `main`
 - Update `version` in `NguonC/build.gradle.kts` for a new extension release.
 
 
-## MyStream v2 (independent extension)
+## MyStream v3 (independent extension)
 
 MyStream is a separate CloudStream extension. NguonC v7 is not used by MyStream and its playback code remains independent.
 
 ### Features
 
-- Home sections: Nổi bật, Mới cập nhật, Phim lẻ, Phim bộ, Anime, Tất cả.
-- Catalog pagination for larger libraries.
-- Search by title, original title, country, status, genre and tags.
+- Home sections are generated from local feeds, plus a paginated Internet Archive feature-film catalog.
+- Real pagination: the public movie catalog loads 30 entries per page and continues as the user scrolls.
+- Search combines local MyStream feeds with the remote public movie index.
 - Movie, TV series and Anime entries.
 - Seasons and episodes with independent sources/subtitles per episode.
 - Multiple playback sources per movie/episode.
@@ -46,6 +46,7 @@ MyStream is a separate CloudStream extension. NguonC v7 is not used by MyStream 
 - Editable catalog: `catalog/mystream.json`
 - Published catalog: `https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/mystream.json`
 - Published plugin: `https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/MyStream.cs3`
+- Dynamic public catalog: Internet Archive `feature_films`, fetched at runtime with pagination; movie metadata is resolved on demand and playable MP4 files are selected from item metadata.
 
 ### Catalog format
 
