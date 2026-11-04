@@ -38,6 +38,9 @@ jobs:
         with:
           gradle-version: '8.12'
 
+      - name: Validate MyStream catalog
+        run: python scripts/validate_mystream_catalog.py
+
       - name: Build extension and plugin manifest
         run: gradle make makePluginsJson --stacktrace
 
@@ -52,6 +55,7 @@ jobs:
           cp build/plugins.json publish/plugins.json
           cp repo.json publish/repo.json
           cp catalog/mystream.json publish/mystream.json
+          cp catalog/mystream-feeds.json publish/mystream-feeds.json
           test -n "$(find publish -name '*.cs3' -print -quit)"
           test -s publish/plugins.json
 

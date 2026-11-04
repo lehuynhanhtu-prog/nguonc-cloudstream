@@ -1,8 +1,8 @@
-version = 1
+version = 2
 
 cloudstream {
     language = "vi"
-    description = "MyStream - phát MP4/HLS từ catalog JSON cá nhân"
+    description = "MyStream v2 - thư viện cá nhân MP4/HLS/DASH/embed từ catalog JSON"
     authors = listOf("lehuynhanhtu-prog")
     status = 1
     tvTypes = listOf("Movie", "TvSeries", "Anime")

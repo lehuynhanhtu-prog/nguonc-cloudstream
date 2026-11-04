@@ -1,0 +1,99 @@
+{
+  "version": 2,
+  "items": [
+    {
+      "id": "phim-le-mau",
+      "title": "Phim lẻ mẫu",
+      "type": "movie",
+      "year": 2026,
+      "enabled": false,
+      "featured": false,
+      "section": "Thư viện cá nhân",
+      "genres": [
+        "Thể loại"
+      ],
+      "poster": "https://example.com/poster.jpg",
+      "backdrop": "https://example.com/backdrop.jpg",
+      "plot": "Mô tả phim.",
+      "sources": [
+        {
+          "name": "Server HLS",
+          "url": "https://example.com/master.m3u8",
+          "type": "hls",
+          "quality": "1080p",
+          "referer": "",
+          "headers": {}
+        },
+        {
+          "name": "Server DASH",
+          "url": "https://example.com/manifest.mpd",
+          "type": "dash",
+          "quality": "1080p",
+          "enabled": false
+        },
+        {
+          "name": "Server MP4",
+          "url": "https://example.com/movie.mp4",
+          "type": "mp4",
+          "quality": "720p",
+          "enabled": false
+        }
+      ],
+      "subtitles": [
+        {
+          "lang": "vi",
+          "name": "Tiếng Việt",
+          "url": "https://example.com/sub.vi.vtt",
+          "enabled": true
+        }
+      ]
+    },
+    {
+      "id": "phim-bo-mau",
+      "title": "Phim bộ mẫu",
+      "type": "series",
+      "year": 2026,
+      "enabled": false,
+      "section": "Thư viện cá nhân",
+      "genres": [
+        "Phim bộ"
+      ],
+      "poster": "https://example.com/poster-series.jpg",
+      "plot": "Ví dụ cấu trúc nhiều tập.",
+      "episodes": [
+        {
+          "name": "Tập 1",
+          "season": 1,
+          "episode": 1,
+          "sources": [
+            {
+              "name": "HLS",
+              "url": "https://example.com/s01e01.m3u8",
+              "type": "hls",
+              "quality": "1080p"
+            }
+          ],
+          "subtitles": [
+            {
+              "lang": "vi",
+              "url": "https://example.com/s01e01.vi.vtt"
+            }
+          ]
+        },
+        {
+          "name": "Tập 2",
+          "season": 1,
+          "episode": 2,
+          "sources": [
+            {
+              "name": "DASH",
+              "url": "https://example.com/s01e02.mpd",
+              "type": "dash",
+              "quality": "1080p"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
