@@ -41,6 +41,10 @@ jobs:
       - name: Validate MyStream catalog
         run: python scripts/validate_mystream_catalog.py
 
+      - name: Validate MyStream paginated archive source
+        if: github.event_name == 'pull_request'
+        run: python scripts/validate_mystream_archive.py
+
       - name: Build extension and plugin manifest
         run: gradle make makePluginsJson --stacktrace
 
