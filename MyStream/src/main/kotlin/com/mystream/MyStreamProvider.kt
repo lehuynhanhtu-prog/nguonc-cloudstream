@@ -434,7 +434,7 @@ class MyStreamProvider : MainAPI() {
         val root = fetchJson(archiveMetadataUrl + "/" + pathEncode(identifier)) ?: return null
         val metadata = root.path("metadata")
         val title = flexibleText(metadata, "title").ifBlank { identifier }
-        val plot = flexibleText(metadata, "description")
+        val archivePlot = flexibleText(metadata, "description")
             .replace(Regex("<[^>]+>"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
@@ -503,7 +503,7 @@ class MyStreamProvider : MainAPI() {
             payload.toString(),
         ) {
             posterUrl = archivePosterUrl(identifier)
-            plot = plot
+            plot = archivePlot
             year = yearValue
             tags = tagsValue
         }
