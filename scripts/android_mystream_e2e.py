@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Release smoke test: MyStream v2 current main + published catalog.
 import os
 import re
 import subprocess
