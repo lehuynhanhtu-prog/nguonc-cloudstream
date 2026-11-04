@@ -23,20 +23,69 @@ Pull requests are compiled by GitHub Actions before changes are merged to `main`
 - Update `version` in `NguonC/build.gradle.kts` for a new extension release.
 
 
-## MyStream (independent extension)
+## MyStream v2 (independent extension)
 
-MyStream is a separate CloudStream extension in the same repository. It does not modify the NguonC provider or its playback code.
+MyStream is a separate CloudStream extension. NguonC v7 is not used by MyStream and its playback code remains independent.
+
+### Features
+
+- Home sections: Nổi bật, Mới cập nhật, Phim lẻ, Phim bộ, Anime, Tất cả.
+- Catalog pagination for larger libraries.
+- Search by title, original title, country, status, genre and tags.
+- Movie, TV series and Anime entries.
+- Seasons and episodes with independent sources/subtitles per episode.
+- Multiple playback sources per movie/episode.
+- Direct MP4/video, HLS (`.m3u8`), DASH (`.mpd`) and CloudStream-supported embed/extractor links.
+- Per-source `Referer` and custom HTTP headers.
+- Remote JSON catalog caching with automatic refresh.
+- Catalog validation in GitHub Actions before every build.
+
+### Files
 
 - Extension source: `MyStream/src/main/kotlin/com/mystream/`
 - Editable catalog: `catalog/mystream.json`
 - Published catalog: `https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/mystream.json`
-- Supported direct media: MP4 and HLS (`.m3u8`)
-- Supports movies, episodic series, poster/plot/year/tags, multiple sources, per-source headers/referer, and subtitles.
+- Published plugin: `https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/MyStream.cs3`
 
-A public sample item is included only to verify installation and playback. To add your own media, edit `catalog/mystream.json`; the extension fetches the catalog remotely so ordinary catalog changes do not require a MyStream version bump.
+### Catalog format
+
+Movie source example:
+
+```json
+{
+  "id": "my-movie",
+  "title": "My Movie",
+  "type": "movie",
+  "year": 2026,
+  "updatedAt": "2026-11-04",
+  "featured": true,
+  "poster": "https://example.com/poster.jpg",
+  "genres": ["Action"],
+  "tags": ["HD"],
+  "sources": [
+    {
+      "name": "HLS 1080p",
+      "url": "https://example.com/master.m3u8",
+      "type": "hls",
+      "quality": "1080p",
+      "referer": "https://example.com/"
+    }
+  ],
+  "subtitles": [
+    {
+      "lang": "vi",
+      "url": "https://example.com/subtitle.vtt"
+    }
+  ]
+}
+```
+
+For series/anime, put playback sources in each `episodes[]` entry and set `season`, `episode`, and `name`. For supported embed hosts, use `"type": "embed"` or `"type": "extractor"`; MyStream delegates extraction to CloudStream's registered extractors.
+
+The shipped catalog contains public test streams so installation and playback can be verified safely. Replace or extend these entries with media URLs you are authorized to use. Catalog-only changes are published without requiring a MyStream code change; bump the MyStream plugin version only when plugin behavior changes.
 
 ## Validation
 
-The provider uses NguonC API endpoints for lists, search, film details, and episode streams. API availability, Gradle compatibility, and Android playback have **not yet been independently verified**. Check the Actions tab for build errors before using the repository URL.
+NguonC and MyStream are built by GitHub Actions. Pull requests also run Android E2E playback tests in official CloudStream 4.8.0; MyStream's catalog is validated before compilation.
 
 This extension is independent and is not an official NguonC or CloudStream release. Only access media you have rights to view.
