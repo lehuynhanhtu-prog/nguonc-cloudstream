@@ -15,29 +15,45 @@ class MyStreamProvider : MainAPI() {
 
     private val mapper = jacksonObjectMapper()
     private val catalogUrl = "$mainUrl/mystream.json"
+    private val pageSize = 30
+    private val cacheTtlMs = 15_000L
+
+    @Volatile
+    private var cachedCatalog: JsonNode? = null
+
+    @Volatile
+    private var cachedAtMs: Long = 0L
 
     override val mainPage = mainPageOf(
-        "all" to "Thư viện MyStream",
+        "featured" to "Nổi bật",
+        "latest" to "Mới cập nhật",
+        "movie" to "Phim lẻ",
+        "series" to "Phim bộ",
+        "anime" to "Anime",
+        "all" to "Tất cả",
     )
 
     private val fallbackCatalog = """
         {
-          "version": 1,
+          "version": 2,
+          "updatedAt": "2026-11-04",
           "items": [
             {
               "id": "big-buck-bunny",
-              "title": "Big Buck Bunny - Kiểm thử MyStream",
+              "title": "Big Buck Bunny",
               "type": "movie",
               "year": 2008,
+              "updatedAt": "2026-11-04",
+              "featured": true,
               "poster": "https://storage.googleapis.com/gtv-videos-bucket/sample/images/BigBuckBunny.jpg",
-              "plot": "Video mẫu công khai dùng để kiểm tra phát video trực tiếp trong MyStream.",
-              "tags": ["Mẫu", "Kiểm thử"],
+              "plot": "Nội dung mẫu công khai dùng để kiểm tra MyStream.",
+              "tags": ["Mẫu", "Công khai"],
               "sources": [
                 {
-                  "name": "MP4 mẫu",
-                  "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-                  "type": "video",
-                  "quality": "720p"
+                  "name": "HLS Adaptive",
+                  "url": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+                  "type": "hls",
+                  "quality": "1080p"
                 }
               ],
               "subtitles": []
@@ -49,7 +65,18 @@ class MyStreamProvider : MainAPI() {
     private fun JsonNode.textValue(key: String): String =
         path(key).asText("").trim()
 
-    private suspend fun catalog(): JsonNode {
+    private fun JsonNode.stringList(key: String): List<String> =
+        path(key).takeIf { it.isArray }
+            ?.map { it.asText("").trim() }
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
+
+    private suspend fun catalog(forceRefresh: Boolean = false): JsonNode {
+        val now = System.currentTimeMillis()
+        cachedCatalog?.let { cached ->
+            if (!forceRefresh && now - cachedAtMs < cacheTtlMs) return cached
+        }
+
         val remote = runCatching {
             app.get(
                 catalogUrl,
@@ -60,11 +87,15 @@ class MyStreamProvider : MainAPI() {
             ).text
         }.getOrNull()
 
-        return runCatching {
+        val parsed = runCatching {
             mapper.readTree(remote?.takeIf { it.isNotBlank() } ?: fallbackCatalog)
         }.getOrElse {
             mapper.readTree(fallbackCatalog)
         }
+
+        cachedCatalog = parsed
+        cachedAtMs = now
+        return parsed
     }
 
     private suspend fun items(): List<JsonNode> =
@@ -80,53 +111,106 @@ class MyStreamProvider : MainAPI() {
         }
     }
 
-    private fun itemUrl(item: JsonNode): String {
-        val id = item.textValue("id").ifBlank {
-            item.textValue("title").lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+    private fun itemId(item: JsonNode): String =
+        item.textValue("id").ifBlank {
+            item.textValue("title")
+                .lowercase()
+                .replace(Regex("[^a-z0-9]+"), "-")
+                .trim('-')
         }
-        return "$catalogUrl#item=$id"
-    }
+
+    private fun itemUrl(item: JsonNode): String =
+        "$catalogUrl#item=${itemId(item)}"
+
+    private fun itemSortKey(item: JsonNode): String =
+        item.textValue("updatedAt").ifBlank {
+            item.path("year").asInt(0).toString().padStart(4, '0')
+        }
+
+    private fun combinedTags(item: JsonNode): List<String> =
+        (item.stringList("genres") + item.stringList("tags")).distinct()
 
     private fun toSearchResponse(item: JsonNode): SearchResponse? {
         val title = item.textValue("title").ifBlank { return null }
-        val type = itemType(item)
-        return newMovieSearchResponse(title, itemUrl(item), type) {
+        return newMovieSearchResponse(title, itemUrl(item), itemType(item)) {
             posterUrl = item.textValue("poster").ifBlank { null }
             year = item.path("year").asInt(0).takeIf { it > 0 }
         }
     }
 
+    private fun sectionItems(section: String, all: List<JsonNode>): List<JsonNode> {
+        val latest = all.sortedByDescending(::itemSortKey)
+        return when (section.lowercase()) {
+            "featured" -> latest.filter { it.path("featured").asBoolean(false) }.ifEmpty { latest.take(20) }
+            "latest" -> latest
+            "movie" -> latest.filter { itemType(it) == TvType.Movie }
+            "series" -> latest.filter { itemType(it) == TvType.TvSeries }
+            "anime" -> latest.filter { itemType(it) == TvType.Anime }
+            else -> latest
+        }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        if (page > 1) return newHomePageResponse(request.name, emptyList())
-        return newHomePageResponse(request.name, items().mapNotNull(::toSearchResponse))
+        val filtered = sectionItems(request.data.ifBlank { "all" }, items())
+        val safePage = page.coerceAtLeast(1)
+        val from = (safePage - 1) * pageSize
+        if (from >= filtered.size) {
+            return newHomePageResponse(request, emptyList(), false)
+        }
+
+        val to = minOf(from + pageSize, filtered.size)
+        val pageItems = filtered.subList(from, to).mapNotNull(::toSearchResponse)
+        return newHomePageResponse(request, pageItems, to < filtered.size)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val q = query.trim().lowercase()
-        if (q.isBlank()) return emptyList()
-        return items().filter { item ->
-            val haystack = buildString {
-                append(item.textValue("title"))
-                append(' ')
-                append(item.textValue("originalTitle"))
-                append(' ')
-                item.path("tags").takeIf { it.isArray }?.forEach {
-                    append(it.asText())
+        val words = query.trim().lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (words.isEmpty()) return emptyList()
+
+        return items()
+            .filter { item ->
+                val haystack = buildString {
+                    append(item.textValue("title"))
                     append(' ')
-                }
-            }.lowercase()
-            q.split(Regex("\\s+")).all { it in haystack }
-        }.mapNotNull(::toSearchResponse)
+                    append(item.textValue("originalTitle"))
+                    append(' ')
+                    append(item.textValue("country"))
+                    append(' ')
+                    append(item.textValue("status"))
+                    append(' ')
+                    combinedTags(item).forEach {
+                        append(it)
+                        append(' ')
+                    }
+                }.lowercase()
+                words.all { it in haystack }
+            }
+            .sortedByDescending(::itemSortKey)
+            .mapNotNull(::toSearchResponse)
+    }
+
+    private fun playbackData(item: JsonNode, episode: JsonNode? = null): String {
+        val sourceNode = episode?.path("sources")
+            ?.takeIf { it.isArray && it.size() > 0 }
+            ?: item.path("sources")
+
+        val mergedSubtitles = mapper.createArrayNode()
+        item.path("subtitles").takeIf { it.isArray }?.forEach { mergedSubtitles.add(it) }
+        episode?.path("subtitles")?.takeIf { it.isArray }?.forEach { mergedSubtitles.add(it) }
+
+        return mapper.writeValueAsString(
+            mapOf(
+                "sources" to sourceNode,
+                "subtitles" to mergedSubtitles,
+            )
+        )
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val id = url.substringAfter("#item=", "").substringBefore('&').trim()
         if (id.isBlank()) return null
 
-        val item = items().firstOrNull {
-            itemUrl(it).substringAfter("#item=") == id
-        } ?: return null
-
+        val item = items().firstOrNull { itemId(it) == id } ?: return null
         val title = item.textValue("title").ifBlank { id }
         val type = itemType(item)
         val detailUrl = itemUrl(item)
@@ -134,12 +218,12 @@ class MyStreamProvider : MainAPI() {
         val backdrop = item.textValue("backdrop").ifBlank { null }
         val plotText = item.textValue("plot").ifBlank { null }
         val yearValue = item.path("year").asInt(0).takeIf { it > 0 }
-        val tagsValue = item.path("tags").takeIf { it.isArray }?.map { it.asText() }?.filter { it.isNotBlank() }
+        val tagsValue = combinedTags(item).takeIf { it.isNotEmpty() }
 
         val episodeNodes = item.path("episodes").takeIf { it.isArray }?.toList().orEmpty()
         if (episodeNodes.isNotEmpty()) {
             val episodes = episodeNodes.mapIndexed { index, episode ->
-                newEpisode(episode.toString()) {
+                newEpisode(playbackData(item, episode)) {
                     name = episode.textValue("name").ifBlank { "Tập ${index + 1}" }
                     this.episode = episode.path("episode").asInt(index + 1)
                     season = episode.path("season").asInt(0).takeIf { it > 0 }
@@ -156,7 +240,7 @@ class MyStreamProvider : MainAPI() {
             }
         }
 
-        return newMovieLoadResponse(title, detailUrl, type, item.toString()) {
+        return newMovieLoadResponse(title, detailUrl, type, playbackData(item)) {
             posterUrl = poster
             backgroundPosterUrl = backdrop
             plot = plotText
@@ -185,6 +269,15 @@ class MyStreamProvider : MainAPI() {
         else -> Qualities.Unknown.value
     }
 
+    private fun linkType(source: JsonNode, url: String): ExtractorLinkType {
+        val type = source.textValue("type").lowercase()
+        return when {
+            type == "hls" || type == "m3u8" || url.contains(".m3u8", true) -> ExtractorLinkType.M3U8
+            type == "dash" || type == "mpd" || url.contains(".mpd", true) -> ExtractorLinkType.DASH
+            else -> ExtractorLinkType.VIDEO
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -198,7 +291,9 @@ class MyStreamProvider : MainAPI() {
             if (url.isBlank()) return@forEach
             subtitleCallback(
                 newSubtitleFile(
-                    subtitle.textValue("lang").ifBlank { subtitle.textValue("name").ifBlank { "Sub" } },
+                    subtitle.textValue("lang").ifBlank {
+                        subtitle.textValue("name").ifBlank { "Sub" }
+                    },
                     url,
                 )
             )
@@ -206,34 +301,39 @@ class MyStreamProvider : MainAPI() {
 
         var emitted = false
         node.path("sources").takeIf { it.isArray }?.forEach { source ->
+            if (source.path("enabled").isBoolean && !source.path("enabled").asBoolean()) {
+                return@forEach
+            }
+
             val streamUrl = source.textValue("url")
             if (streamUrl.isBlank()) return@forEach
 
-            val typeText = source.textValue("type")
-            val linkType = if (
-                typeText.equals("hls", true) ||
-                typeText.equals("m3u8", true) ||
-                streamUrl.contains(".m3u8", true)
-            ) {
-                ExtractorLinkType.M3U8
-            } else {
-                ExtractorLinkType.VIDEO
-            }
-
             val sourceName = source.textValue("name").ifBlank { name }
             val refererValue = source.textValue("referer")
-            val sourceHeaders = headers(source)
+            val sourceType = source.textValue("type").lowercase()
+
+            if (sourceType == "embed" || sourceType == "extractor") {
+                loadExtractor(
+                    streamUrl,
+                    refererValue.ifBlank { null },
+                    subtitleCallback,
+                ) { link ->
+                    callback(link)
+                    emitted = true
+                }
+                return@forEach
+            }
 
             callback(
                 newExtractorLink(
                     name,
                     "$name - $sourceName",
                     streamUrl,
-                    type = linkType,
+                    type = linkType(source, streamUrl),
                 ) {
                     referer = refererValue
                     quality = quality(source.textValue("quality"))
-                    headers = sourceHeaders
+                    headers = headers(source)
                 }
             )
             emitted = true
