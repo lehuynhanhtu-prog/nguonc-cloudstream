@@ -1,0 +1,263 @@
+{
+  "version": 2,
+  "updatedAt": "2026-11-04",
+  "items": [
+    {
+      "id": "big-buck-bunny",
+      "title": "Big Buck Bunny",
+      "originalTitle": "Big Buck Bunny",
+      "type": "movie",
+      "year": 2008,
+      "updatedAt": "2026-11-04",
+      "featured": true,
+      "country": "Open Movie",
+      "status": "Hoàn thành",
+      "genres": [
+        "Hoạt hình",
+        "Mẫu công khai"
+      ],
+      "poster": "https://storage.googleapis.com/gtv-videos-bucket/sample/images/BigBuckBunny.jpg",
+      "plot": "Phim mẫu công khai dùng để kiểm tra MyStream v2 và nhiều nguồn HLS.",
+      "tags": [
+        "Mẫu",
+        "Công khai",
+        "HLS"
+      ],
+      "sources": [
+        {
+          "name": "HLS Adaptive",
+          "url": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+          "type": "hls",
+          "quality": "1080p"
+        },
+        {
+          "name": "HLS 480p",
+          "url": "https://test-streams.mux.dev/x36xhzz/url_6/193039199_mp4_h264_aac_hq_7.m3u8",
+          "type": "hls",
+          "quality": "480p"
+        }
+      ],
+      "subtitles": [],
+      "section": "Phim mở"
+    },
+    {
+      "id": "tears-of-steel",
+      "title": "Tears of Steel",
+      "originalTitle": "Tears of Steel",
+      "type": "movie",
+      "year": 2012,
+      "updatedAt": "2026-11-03",
+      "featured": true,
+      "country": "Open Movie",
+      "status": "Hoàn thành",
+      "genres": [
+        "Khoa học viễn tưởng",
+        "Mẫu công khai"
+      ],
+      "poster": "https://storage.googleapis.com/gtv-videos-bucket/sample/images/TearsOfSteel.jpg",
+      "plot": "Nội dung mẫu HLS công khai để kiểm tra phát phim và track caption trong manifest.",
+      "tags": [
+        "Mẫu",
+        "Công khai",
+        "HLS"
+      ],
+      "sources": [
+        {
+          "name": "HLS Tears of Steel",
+          "url": "https://test-streams.mux.dev/tos_ismc/main.m3u8",
+          "type": "hls",
+          "quality": "1080p"
+        }
+      ],
+      "subtitles": [],
+      "section": "Phim mở"
+    },
+    {
+      "id": "mystream-series-demo",
+      "title": "MyStream Series Demo",
+      "type": "series",
+      "year": 2026,
+      "updatedAt": "2026-11-04",
+      "featured": true,
+      "country": "MyStream",
+      "status": "Đang thử nghiệm",
+      "genres": [
+        "Phim bộ",
+        "Mẫu"
+      ],
+      "poster": "https://storage.googleapis.com/gtv-videos-bucket/sample/images/ElephantsDream.jpg",
+      "plot": "Phim bộ mẫu để kiểm tra danh sách tập, mùa, nguồn phát riêng theo từng tập và phụ đề theo tập.",
+      "tags": [
+        "Series",
+        "Mẫu",
+        "Nhiều tập"
+      ],
+      "subtitles": [],
+      "episodes": [
+        {
+          "season": 1,
+          "episode": 1,
+          "name": "Tập 1 - Big Buck Bunny",
+          "poster": "https://storage.googleapis.com/gtv-videos-bucket/sample/images/BigBuckBunny.jpg",
+          "sources": [
+            {
+              "name": "HLS Adaptive",
+              "url": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+              "type": "hls",
+              "quality": "1080p"
+            }
+          ],
+          "subtitles": []
+        },
+        {
+          "season": 1,
+          "episode": 2,
+          "name": "Tập 2 - Tears of Steel",
+          "poster": "https://storage.googleapis.com/gtv-videos-bucket/sample/images/TearsOfSteel.jpg",
+          "sources": [
+            {
+              "name": "HLS Tears of Steel",
+              "url": "https://test-streams.mux.dev/tos_ismc/main.m3u8",
+              "type": "hls",
+              "quality": "1080p"
+            }
+          ],
+          "subtitles": []
+        },
+        {
+          "season": 2,
+          "episode": 1,
+          "name": "Tập 1 - ARTE China",
+          "poster": "https://storage.googleapis.com/gtv-videos-bucket/sample/images/ForBiggerEscapes.jpg",
+          "sources": [
+            {
+              "name": "HLS ARTE",
+              "url": "https://test-streams.mux.dev/test_001/stream.m3u8",
+              "type": "hls",
+              "quality": "1080p"
+            }
+          ],
+          "subtitles": []
+        }
+      ],
+      "section": "Phim bộ mẫu"
+    },
+    {
+      "id": "mystream-anime-demo",
+      "title": "MyStream Anime Demo",
+      "type": "anime",
+      "year": 2026,
+      "updatedAt": "2026-11-02",
+      "featured": false,
+      "country": "MyStream",
+      "status": "Mẫu",
+      "genres": [
+        "Anime",
+        "Mẫu"
+      ],
+      "poster": "https://storage.googleapis.com/gtv-videos-bucket/sample/images/Sintel.jpg",
+      "plot": "Mục mẫu để kiểm tra phân loại Anime và nhiều tập. Video bên trong là stream test công khai.",
+      "tags": [
+        "Anime",
+        "Mẫu"
+      ],
+      "subtitles": [],
+      "episodes": [
+        {
+          "season": 1,
+          "episode": 1,
+          "name": "Tập 1 - HLS Adaptive",
+          "sources": [
+            {
+              "name": "HLS Adaptive",
+              "url": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+              "type": "hls",
+              "quality": "1080p"
+            }
+          ],
+          "subtitles": []
+        },
+        {
+          "season": 1,
+          "episode": 2,
+          "name": "Tập 2 - HLS 480p",
+          "sources": [
+            {
+              "name": "HLS 480p",
+              "url": "https://test-streams.mux.dev/x36xhzz/url_6/193039199_mp4_h264_aac_hq_7.m3u8",
+              "type": "hls",
+              "quality": "480p"
+            }
+          ],
+          "subtitles": []
+        }
+      ],
+      "section": "Anime mẫu"
+    },
+    {
+      "id": "sintel",
+      "title": "Sintel",
+      "originalTitle": "Sintel",
+      "type": "movie",
+      "year": 2010,
+      "updatedAt": "2026-11-04",
+      "featured": true,
+      "country": "Open Movie",
+      "status": "Hoàn thành",
+      "section": "Phim mở",
+      "genres": [
+        "Hoạt hình",
+        "Phiêu lưu",
+        "Kỳ ảo"
+      ],
+      "poster": "https://commons.wikimedia.org/wiki/Special:Redirect/file/Sintel%20poster.jpg",
+      "plot": "Sintel lên đường tìm kiếm một chú rồng nhỏ mà cô từng cứu, trong một hành trình phiêu lưu của Blender Foundation.",
+      "tags": [
+        "Blender",
+        "Open Movie",
+        "HLS"
+      ],
+      "sources": [
+        {
+          "name": "HLS Adaptive",
+          "url": "https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8",
+          "type": "hls",
+          "quality": "1080p"
+        }
+      ],
+      "subtitles": []
+    },
+    {
+      "id": "elephants-dream",
+      "title": "Elephants Dream",
+      "originalTitle": "Elephants Dream",
+      "type": "movie",
+      "year": 2006,
+      "updatedAt": "2026-11-04",
+      "featured": false,
+      "country": "Open Movie",
+      "status": "Hoàn thành",
+      "section": "Phim mở",
+      "genres": [
+        "Hoạt hình",
+        "Khoa học viễn tưởng"
+      ],
+      "poster": "https://commons.wikimedia.org/wiki/Special:Redirect/file/ElephantsDreamPoster.jpg",
+      "plot": "Hai nhân vật khám phá một cỗ máy khổng lồ và kỳ dị trong bộ phim mở đầu tiên của Blender Foundation.",
+      "tags": [
+        "Blender",
+        "Open Movie",
+        "HLS"
+      ],
+      "sources": [
+        {
+          "name": "HLS Adaptive",
+          "url": "https://bitdash-a.akamaihd.net/content/MI201109210084_1/m3u8s/f08e80da-bf1d-4e3d-8899-f0f6155f6efa.m3u8",
+          "type": "hls",
+          "quality": "1080p"
+        }
+      ],
+      "subtitles": []
+    }
+  ]
+}
