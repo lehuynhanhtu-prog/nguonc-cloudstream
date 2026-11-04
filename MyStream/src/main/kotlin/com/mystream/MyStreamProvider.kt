@@ -254,7 +254,10 @@ class MyStreamProvider : MainAPI() {
             )
         }
 
-        if (page > 1) return newHomePageResponse(emptyList<HomePageList>(), false)
+        if (page > 1) {
+            val archive = archivePage(page)
+            return newHomePageResponse(request, archive.docs.mapNotNull(::archiveDocToSearch), archive.hasNext)
+        }
 
         val all = items()
         val lists = mutableListOf<HomePageList>()
@@ -295,7 +298,12 @@ class MyStreamProvider : MainAPI() {
             add("Thư viện MyStream", all)
         }
 
-        return newHomePageResponse(lists.distinctBy { it.name }, false)
+        val archive = archivePage(1)
+        val archiveResults = archive.docs.mapNotNull(::archiveDocToSearch)
+        if (archiveResults.isNotEmpty()) {
+            lists.add(HomePageList("Kho phim công khai - Internet Archive", archiveResults))
+        }
+        return newHomePageResponse(lists.distinctBy { it.name }, archive.hasNext)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
