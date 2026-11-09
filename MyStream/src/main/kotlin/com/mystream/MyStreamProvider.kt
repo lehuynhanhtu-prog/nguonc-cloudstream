@@ -25,8 +25,8 @@ class MyStreamProvider : MainAPI() {
     private val archivePageSize = 30
 
     override val mainPage = mainPageOf(
-        "home" to "MyStream",
-        "archive" to "Phim công khai - Internet Archive",
+        "archive" to "Kho phim đầy đủ - Internet Archive",
+        "home" to "MyStream tuyển chọn",
     )
 
     private val fallbackCatalog = """
@@ -254,56 +254,20 @@ class MyStreamProvider : MainAPI() {
             )
         }
 
+        // Keep the editable JSON catalog as a separate curated shelf.  Do not mix
+        // it with the paginated Internet Archive source: CloudStream paginates one
+        // MainPageRequest at a time, and mixing both sources made the home screen
+        // appear to contain only the handful of local demo/catalog entries.
         if (page > 1) {
-            val archive = archivePage(page)
-            return newHomePageResponse(request, archive.docs.mapNotNull(::archiveDocToSearch), archive.hasNext)
+            return newHomePageResponse(request, emptyList(), false)
         }
 
         val all = items()
-        val lists = mutableListOf<HomePageList>()
-
-        fun add(title: String, nodes: List<JsonNode>) {
-            homeList(title, nodes)?.let(lists::add)
-        }
-
-        add("Nổi bật", all.filter { it.path("featured").asBoolean(false) })
-        add(
-            "Mới cập nhật",
-            all.sortedWith(
+            .sortedWith(
                 compareByDescending<JsonNode> { it.textValue("updatedAt") }
                     .thenByDescending { it.path("year").asInt(0) }
-            ).take(40)
-        )
-
-        val customSections = all
-            .filter { it.textValue("section").isNotBlank() }
-            .groupBy { it.textValue("section") }
-        customSections.forEach { (section, nodes) -> add(section, nodes) }
-
-        add("Phim lẻ", all.filter { itemType(it) == TvType.Movie })
-        add("Phim bộ", all.filter { itemType(it) == TvType.TvSeries })
-        add("Anime", all.filter { itemType(it) == TvType.Anime })
-
-        val genreOrder = all
-            .flatMap { it.stringList("genres") }
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .distinct()
-            .take(12)
-        genreOrder.forEach { genre ->
-            add(genre, all.filter { item -> item.stringList("genres").any { it.equals(genre, true) } })
-        }
-
-        if (lists.isEmpty()) {
-            add("Thư viện MyStream", all)
-        }
-
-        val archive = archivePage(1)
-        val archiveResults = archive.docs.mapNotNull(::archiveDocToSearch)
-        if (archiveResults.isNotEmpty()) {
-            lists.add(HomePageList("Kho phim công khai - Internet Archive", archiveResults))
-        }
-        return newHomePageResponse(lists.distinctBy { it.name }, archive.hasNext)
+            )
+        return newHomePageResponse(request, all.mapNotNull(::toSearchResponse), false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
