@@ -129,6 +129,15 @@ def finish_first_run_setup(timeout=50):
         root, _ = dump_ui()
         if find_node(root, resource_suffix=":id/navigation_home") is not None:
             return
+        update_skip = (
+            find_node(root, text="Skip this Update")
+            or find_node(root, text="Cancel")
+            or find_node(root, contains_text="Bỏ qua")
+        )
+        if update_skip is not None:
+            tap_node(update_skip)
+            time.sleep(2)
+            continue
         done = find_node(root, resource_suffix=":id/next_btt")
         if done is not None:
             tap_node(done)

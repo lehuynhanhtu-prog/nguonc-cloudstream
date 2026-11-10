@@ -2,6 +2,7 @@ package com.chophim
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.WebViewResolver
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
@@ -17,6 +18,8 @@ class ChoPhimProvider : MainAPI() {
     override val usesWebView = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
     override val loadLinksTimeoutMs: Long? = 60_000L
+
+    private val cloudflareKiller by lazy { CloudflareKiller() }
 
     private val mirrors = listOf(
         "https://chophim.cam",
@@ -53,6 +56,7 @@ class ChoPhimProvider : MainAPI() {
                 url,
                 headers = browserHeaders(referer),
                 referer = referer,
+                interceptor = cloudflareKiller,
             )
             if (response.code in 200..299) response.text else ""
         }.getOrDefault("")
@@ -95,11 +99,9 @@ class ChoPhimProvider : MainAPI() {
         val p = href.lowercase()
         if (p.isBlank() || p == "/" || p.startsWith("#") || p.startsWith("javascript:")) return false
         if (p.contains("/xem-phim") || p.contains("/watch")) return false
-        return p.contains("/phim/") ||
-            p.startsWith("/phim-") ||
-            p.contains("/movie/") ||
-            p.contains("/series/") ||
-            p.contains("/tv/")
+        if (p.contains("/the-loai") || p.contains("/quoc-gia") || p.contains("/dien-vien") || p.contains("/dao-dien")) return false
+        if (p.contains("/tim-kiem") || p.contains("/search") || p.contains("/login") || p.contains("/dang-nhap")) return false
+        return true
     }
 
     private fun titleFromCard(a: Element): String {
@@ -134,10 +136,11 @@ class ChoPhimProvider : MainAPI() {
         for (a in doc.select("a[href]")) {
             val href = a.attr("href").trim()
             if (!isMovieHref(href)) continue
+            val hasPoster = a.selectFirst("img") != null
+            val title = titleFromCard(a)
+            if (!hasPoster || title.isBlank()) continue
             val url = absolute(base, href)
             if (!seen.add(url)) continue
-            val title = titleFromCard(a)
-            if (title.isBlank()) continue
 
             val text = a.text().lowercase()
             val type = when {
@@ -222,11 +225,16 @@ class ChoPhimProvider : MainAPI() {
     private fun episodeLinks(doc: Document, base: String): List<Pair<String, String>> {
         val seen = linkedSetOf<String>()
         val out = mutableListOf<Pair<String, String>>()
-        val selectors = "a[href*='xem-phim'], a[href*='/watch'], a[href*='/tap-'], a[href*='/episode/'], [data-href*='xem-phim']"
+        val selectors = "a[href], button[data-href], button[data-url], [data-href], [data-url]"
 
         for (el in doc.select(selectors)) {
-            val raw = el.attr("href").ifBlank { el.attr("data-href") }.trim()
+            val raw = el.attr("href").ifBlank { el.attr("data-href") }.ifBlank { el.attr("data-url") }.trim()
             if (raw.isBlank()) continue
+            val labelText = el.text().lowercase()
+            val rawLower = raw.lowercase()
+            val looksPlayable = labelText.contains("xem") || labelText.contains("tập") || labelText.contains("episode") ||
+                rawLower.contains("xem-phim") || rawLower.contains("/watch") || rawLower.contains("/tap-") || rawLower.contains("/episode/")
+            if (!looksPlayable) continue
             val url = absolute(base, raw)
             if (!seen.add(url)) continue
             val label = el.text().trim().ifBlank {

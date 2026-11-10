@@ -25,8 +25,8 @@ class MyStreamProvider : MainAPI() {
     private val archivePageSize = 30
 
     override val mainPage = mainPageOf(
-        "archive" to "Kho phim đầy đủ - Internet Archive",
         "home" to "MyStream tuyển chọn",
+        "archive" to "Kho phim đầy đủ - Internet Archive",
     )
 
     private val fallbackCatalog = """
