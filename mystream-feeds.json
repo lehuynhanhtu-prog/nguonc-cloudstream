@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "feeds": [
+    {
+      "name": "Thư viện chính",
+      "url": "mystream.json",
+      "enabled": true
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+[
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=chophim.cam&sz=%size%",
+        "fileHash": "sha256-1f1b32904ba1d911f0338dafd61fcb149f5594a66834b92e20e1d17b070be295",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/lehuynhanhtu-prog/nguonc-cloudstream",
+        "fileSize": 23618,
+        "status": 1,
+        "language": "vi",
+        "authors": [
+            "lehuynhanhtu-prog"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "version": 2,
+        "internalName": "ChoPhim",
+        "description": "Ch\u1ee3 Phim provider cho CloudStream",
+        "url": "https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/ChoPhim.cs3",
+        "name": "ChoPhim"
+    },
+    {
+        "fileHash": "sha256-b19d606e8b98d1be127c612574d8e7e45d0da471cbc0a7164de1701696331f62",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/lehuynhanhtu-prog/nguonc-cloudstream",
+        "fileSize": 32619,
+        "status": 1,
+        "language": "vi",
+        "authors": [
+            "lehuynhanhtu-prog"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "version": 4,
+        "internalName": "MyStream",
+        "description": "MyStream v3 - catalog \u0111\u1ed9ng, ph\u00e2n trang, MP4/HLS/DASH t\u1eeb nhi\u1ec1u ngu\u1ed3n",
+        "url": "https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/MyStream.cs3",
+        "name": "MyStream"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=phim.nguonc.com&sz=%size%",
+        "fileHash": "sha256-0d3d5df7007abbd1cfdaa33f44f95376bc906c159fa6648c93e230e4af494440",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/lehuynhanhtu-prog/nguonc-cloudstream",
+        "fileSize": 52302,
+        "status": 1,
+        "language": "vi",
+        "authors": [
+            "lehuynhanhtu-prog"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "version": 7,
+        "internalName": "NguonC",
+        "description": "NguonC provider for CloudStream",
+        "url": "https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/NguonC.cs3",
+        "name": "NguonC"
+    }
+]

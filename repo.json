@@ -1,0 +1,8 @@
+{
+  "name": "NguonC CloudStream",
+  "description": "NguonC extension for CloudStream Android",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/lehuynhanhtu-prog/nguonc-cloudstream/builds/plugins.json"
+  ]
+}
